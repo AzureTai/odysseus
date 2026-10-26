@@ -6213,9 +6213,11 @@ import { invalidateSettings } from './appConfig.js';
       // The server now reports "no active stream" as 200 {status:"idle"} (an
       // older server used 404); a body with status "streaming" means it is NOT
       // stale. Accept both so the watchdog keeps working across deploys.
+      if (res.status !== 404 && !res.ok) return;
       let _probe = null;
       try { _probe = await res.json(); } catch (_) { _probe = null; }
-      const _noActiveStream = res.status === 404 || !_probe || _probe.status !== 'streaming';
+      const _noActiveStream = res.status === 404 || (res.ok && _probe &&
+        typeof _probe.status === 'string' && _probe.status !== 'streaming');
       if (!_noActiveStream) return;
 
       console.warn('[stream-watchdog] Local stream was stale and server has no active stream. Unlocking composer.');
