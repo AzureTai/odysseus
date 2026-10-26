@@ -499,7 +499,7 @@ function _eventSourceHtml(ev) {
   // calendar name). The calendar-initial badge alone is multi-calendar UI.
   if (ev.source_email_uid && ev.source_email_folder) {
     const href = `#email=${encodeURIComponent(ev.source_email_folder)}:${encodeURIComponent(ev.source_email_uid)}`;
-    return `<a class="cal-event-source cal-event-source-email" href="${_e(href)}" title="Open source email" aria-label="Open source email"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><polyline points="3 7 12 13 21 7"></polyline></svg></a>`;
+    return `<a class="cal-event-source cal-event-source-email" href="${_e(href)}" title="Open source email" aria-label="Open source email" onclick="event.stopPropagation();"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><polyline points="3 7 12 13 21 7"></polyline></svg></a>`;
   }
   if (_calendars.length <= 1) return '';
   const cal = _calendars.find(c => c.href === ev.calendar_href);
@@ -764,7 +764,7 @@ function _getModal() {
     <div class="modal-content cal-modal-content">
       <div class="modal-header">
         <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Calendar</h4>
-        <button class="close-btn" id="cal-close" aria-label="Close">✖</button>
+        <button class="close-btn" id="cal-close">✖</button>
       </div>
       <div class="modal-body" id="cal-body"></div>
       <button class="cal-side-nav cal-side-nav-prev" id="cal-side-prev" title="Previous" aria-label="Previous">&lsaquo;</button>
@@ -897,7 +897,7 @@ function _updateDaySearchResults() {
   // Re-wire click handlers on the newly-inserted event rows.
   dayDetail.querySelectorAll('.cal-event-item').forEach(it => {
     it.addEventListener('click', (e) => {
-      if (e.target.closest('.cal-event-more, .cal-event-source, .cal-event-link')) return;
+      if (e.target.closest('.cal-event-more, .cal-event-source')) return;
       const ev = _events.find(x => x.uid === it.dataset.uid);
       if (ev) _showEventForm(ev);
     });
@@ -2230,7 +2230,7 @@ async function _renderAgenda() {
   _wireAll(body);
   _wireQuickDelete(body);
   body.querySelectorAll('.cal-agenda-event').forEach(el => el.addEventListener('click', (e) => {
-    if (e.target.closest('.cal-event-more, .cal-event-source, .cal-event-link')) return;
+    if (e.target.closest('.cal-event-more, .cal-event-source')) return;
     const ev = _events.find(e => e.uid === el.dataset.uid);
     if (ev) _showEventForm(ev);
   }));
@@ -2295,7 +2295,7 @@ async function _renderSearch() {
   _wireAll(body);
   _wireQuickDelete(body);
   body.querySelectorAll('.cal-agenda-event').forEach(el => el.addEventListener('click', (e) => {
-    if (e.target.closest('.cal-event-more, .cal-event-source, .cal-event-link')) return;
+    if (e.target.closest('.cal-event-more, .cal-event-source')) return;
     const ev = _allEvents[el.dataset.uid];
     if (ev) _showEventForm(ev);
   }));
@@ -2984,7 +2984,7 @@ function _wireAll(body) {
     _render();
   }));
   body.querySelectorAll('.cal-event-item').forEach(it => it.addEventListener('click', (e) => {
-    if (e.target.closest('.cal-event-more, .cal-event-source, .cal-event-link')) return;
+    if (e.target.closest('.cal-event-more, .cal-event-source')) return;
     const ev = _events.find(e => e.uid === it.dataset.uid);
     if (ev) _showEventForm(ev);
   }));
@@ -4170,7 +4170,7 @@ function _locHTML(loc, description = '') {
   if (meetingMatch && !/https?:\/\/(?:teams\.microsoft\.com|(?:[a-z0-9-]+\.)?zoom\.us|meet\.google\.com|(?:[a-z0-9-]+\.)?webex\.com|meet\.jit\.si)\//i.test(String(loc))) {
     const meetingUrl = meetingMatch[0].replace(/[.,);\]]+$/, '');
     const safeMeetingUrl = _e(meetingUrl);
-    return `<a class="cal-event-link" href="${safeMeetingUrl}" target="_blank" rel="noopener" title="Join meeting">${safeMeetingUrl}</a>`;
+    return `<a href="${safeMeetingUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation();" title="Join meeting">${safeMeetingUrl}</a>`;
   }
   const urlRe = /(https?:\/\/[^\s<>"']+)/gi;
   if (urlRe.test(loc)) {
@@ -4182,14 +4182,14 @@ function _locHTML(loc, description = '') {
       const url = match[0];
       html += _e(String(loc).slice(offset, match.index));
       const safe = _e(url);
-      html += `<a class="cal-event-link" href="${safe}" target="_blank" rel="noopener">${safe}</a>`;
+      html += `<a href="${safe}" target="_blank" rel="noopener" onclick="event.stopPropagation();">${safe}</a>`;
       offset = match.index + url.length;
     }
     return (html + _e(String(loc).slice(offset))).replace(/\n/g, '<br>');
   }
   // No URL — link the whole thing to OpenStreetMap.
   const mapUrl = 'https://www.openstreetmap.org/search?query=' + encodeURIComponent(loc);
-  return `<a class="cal-event-link" href="${mapUrl}" target="_blank" rel="noopener" title="Open in OpenStreetMap">${_e(loc)}</a>`;
+  return `<a href="${mapUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation();" title="Open in OpenStreetMap">${_e(loc)}</a>`;
 }
 
 // ── Open / Close ──

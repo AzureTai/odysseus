@@ -1996,17 +1996,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
   // Active drop mode for the PDF toolbar — toolbar buttons set this; the
   // next click on a page consumes it. null means clicks do nothing.
   let _pdfDropMode = null;
-  let _pdfAnnotationDragging = false;
-  function _setPdfAnnotationDragging(dragging) {
-    _pdfAnnotationDragging = dragging;
-    for (const ref of _pdfPaneAnnotationsByDoc.get(activeDocId) || []) {
-      ref._refreshHandles?.();
-      if (dragging) {
-        const menu = ref.wrap?.querySelector('.pdf-annotation-text-menu');
-        if (menu) menu.style.display = 'none';
-      }
-    }
-  }
   // Per-doc last-used line spacing for text annotations. Once the user picks
   // 1.6 for one box, every text box dropped after that defaults to 1.6.
   const _pdfLastLineHeight = new Map(); // docId -> number
@@ -2301,16 +2290,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       // active (toolbar buttons set the mode). Without a mode, clicking does
       // nothing — keeps page interactions predictable so users don't get
       // surprise boxes from stray clicks.
-      const isBlankPageTarget = target => target === pageWrap
-        || (target?.tagName === 'IMG' && target.parentElement === pageWrap);
-      let placementStartedOnPage = false;
-      pageWrap.addEventListener('pointerdown', ev => {
-        placementStartedOnPage = isBlankPageTarget(ev.target);
-      }, true);
       pageWrap.addEventListener('click', (ev) => {
-        const canPlace = placementStartedOnPage;
-        placementStartedOnPage = false;
-        if (!canPlace || !isBlankPageTarget(ev.target) || _pdfAnnotationDragging) return;
+        if (ev.target !== pageWrap && ev.target.tagName !== 'IMG') return;
         if (!_pdfDropMode) return;
         const rect = pageWrap.getBoundingClientRect();
         const xPct = ((ev.clientX - rect.left) / rect.width) * 100;
@@ -2442,11 +2423,9 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
 
     // Set handle visibility together; clicking/tapping the annotation itself
     // brings hidden controls back.
-    let handlesRequested = _isTouch;
     const _setHandlesVisible = (show) => {
-      if (!_pdfAnnotationDragging) handlesRequested = show;
       const dismissed = wrap.dataset.controlsDismissed === '1';
-      const v = (show && !dismissed && !_pdfAnnotationDragging) ? '' : 'none';
+      const v = (show && !dismissed) ? '' : 'none';
       del.style.display = v;
       grip.style.display = v;
       resize.style.display = v;
@@ -2467,8 +2446,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       _setHandlesVisible(true);
     });
 
-    const ref = { id: ann.id, page: ann.page, x: ann.x, y: ann.y, w: ann.w, h: ann.h, el: input, wrap, kind, _setHandlesVisible,
-      _refreshHandles: () => _setHandlesVisible(handlesRequested) };
+    const ref = { id: ann.id, page: ann.page, x: ann.x, y: ann.y, w: ann.w, h: ann.h, el: input, wrap, kind, _setHandlesVisible };
 
     if (kind === 'check') {
       // Stamp checkmark — value is fixed, nothing to listen for.
@@ -2590,12 +2568,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       ref._autoGrow = _autoGrow;
     }
 
-    del.addEventListener('pointerdown', ev => {
-      ev.preventDefault();
-      ev.stopPropagation();
-    });
     del.addEventListener('click', (ev) => {
-      ev.preventDefault();
       ev.stopPropagation();
       _pushPdfUndoSnapshot();
       _removeAnnotation(ref);
@@ -2607,7 +2580,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       ev.stopPropagation();
       _pushPdfUndoSnapshot();
       try { grip.setPointerCapture(ev.pointerId); } catch (_) {}
-      _setPdfAnnotationDragging(true);
       // Hide the × and resize handles while moving so they don't obscure the
       // box — easier to see exactly where it lands. Restored on release.
       del.style.display = 'none';
@@ -2626,14 +2598,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       const onUp = () => {
         document.removeEventListener('pointermove', onMove);
         document.removeEventListener('pointerup', onUp);
-        document.removeEventListener('pointercancel', onUp);
-        _setPdfAnnotationDragging(false);
         _setHandlesVisible(true);
         _schedulePdfPaneSave();
       };
       document.addEventListener('pointermove', onMove);
       document.addEventListener('pointerup', onUp);
-      document.addEventListener('pointercancel', onUp);
     });
 
     // Drag bottom-right corner to resize. Width/height stored as percentages.
@@ -2642,7 +2611,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       ev.stopPropagation();
       _pushPdfUndoSnapshot();
       try { resize.setPointerCapture(ev.pointerId); } catch (_) {}
-      _setPdfAnnotationDragging(true);
       // Hide the × and move handles while resizing — clean view of the box edge.
       del.style.display = 'none';
       grip.style.display = 'none';
@@ -2660,14 +2628,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       const onUp = () => {
         document.removeEventListener('pointermove', onMove);
         document.removeEventListener('pointerup', onUp);
-        document.removeEventListener('pointercancel', onUp);
-        _setPdfAnnotationDragging(false);
         _setHandlesVisible(true);
         _schedulePdfPaneSave();
       };
       document.addEventListener('pointermove', onMove);
       document.addEventListener('pointerup', onUp);
-      document.addEventListener('pointercancel', onUp);
     });
 
     // Text options menu — opened from the floating … button so the spacing
@@ -3451,9 +3416,9 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     }).join('');
 
     if (!changed && /<[^>]+>/.test(text) && typeof document !== 'undefined') {
-      const probe = document.createElement('div');
+      const probe = document.createElement('template');
       probe.innerHTML = text;
-      const plain = (probe.innerText || probe.textContent || '').trim();
+      const plain = (probe.content.textContent || '').trim();
       const plainClean = plain ? _sanitizeOutgoingEmailBody(plain) : plain;
       if (plainClean !== plain) return plainClean;
     }
@@ -3565,9 +3530,9 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
 
   function _emailHtmlToPlainText(html) {
     if (typeof document === 'undefined') return String(html || '');
-    const d = document.createElement('div');
+    const d = document.createElement('template');
     d.innerHTML = String(html || '');
-    return d.innerText || d.textContent || '';
+    return d.content.textContent || '';
   }
 
   function _sanitizedRichTextHtml(rich) {
@@ -5428,15 +5393,20 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         row.dataset.id = item.id || '';
         row.dataset.kind = kind;
         if (kind === 'gallery') {
-          const src = item.url ? `${API_BASE}${item.url}` : '';
           row.innerHTML = `
             <span class="email-odysseus-attach-dot" aria-hidden="true"></span>
-            <span class="email-odysseus-attach-thumb">${src ? `<img src="${_escHtml(src)}" alt="">` : ''}</span>
+            <span class="email-odysseus-attach-thumb"></span>
             <span class="email-odysseus-attach-main">
               <span class="email-odysseus-attach-title">${_escHtml(label)}</span>
               <span class="email-odysseus-attach-meta">${_escHtml(item.filename || 'image')}</span>
             </span>
           `;
+          if (item.url) {
+            const img = document.createElement('img');
+            img.alt = '';
+            img.src = `${API_BASE}${item.url}`;
+            row.querySelector('.email-odysseus-attach-thumb').appendChild(img);
+          }
         } else {
           row.innerHTML = `
             <span class="email-odysseus-attach-dot" aria-hidden="true"></span>
@@ -6765,10 +6735,10 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         .trim();
     };
     const splitCurrent = _splitEmailReplyQuote(currentBody);
-    const ownBody = document.createElement('div');
+    const ownBody = document.createElement('template');
     ownBody.innerHTML = String(splitCurrent.body || '');
-    const ownText = (ownBody.textContent || '').trim();
-    const isReplaceableDraft = (!ownText && !ownBody.querySelector('img,video,audio,iframe,table')) || /^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText);
+    const ownText = (ownBody.content.textContent || '').trim();
+    const isReplaceableDraft = (!ownText && !ownBody.content.querySelector('img,video,audio,iframe,table')) || /^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText);
     if (!isReplaceableDraft) {
       if (uiModule) uiModule.showToast('Reply already has text');
       return;
@@ -7660,8 +7630,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         <button id="doc-email-discard-btn" class="email-discard-btn" title="Close email" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Close</span></button>
         <span style="flex:1"></span>
         <div class="email-send-split">
-          <button type="button" id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
-          <button type="button" id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)" onpointerdown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onmousedown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onclick="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
+          <button type="button" id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false" onpointerdown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)" onmousedown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
           <div id="doc-email-more-menu" class="email-more-menu" style="display:none">
             <div class="dropdown-item-compact" id="doc-email-draft-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></span>Save Draft</div>
             <div class="dropdown-item-compact" id="doc-email-schedule-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>Schedule Send...</div>
@@ -15095,42 +15065,12 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     return _docxReady;
   }
 
-  let _html2pdfReady = null;
-  function ensureHtml2Pdf() {
-    if (_html2pdfReady) return _html2pdfReady;
-    if (window.html2pdf) return (_html2pdfReady = Promise.resolve());
-    _html2pdfReady = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = '/static/lib/html2pdf.bundle.min.js';
-      s.onload = resolve;
-      s.onerror = () => reject(new Error('Failed to load PDF library'));
-      document.head.appendChild(s);
-    });
-    return _html2pdfReady;
-  }
-
   function _getExportBaseName() {
     const doc = docs.get(activeDocId);
     const title = (doc && doc.title) || 'document';
     const safeName = title.replace(/[^a-zA-Z0-9_\-. ]/g, '_').trim() || 'document';
     const ver = doc && doc.version ? `_v${doc.version}` : '';
     return safeName + ver;
-  }
-
-  function _downloadDocumentBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.style.display = 'none';
-    document.body.appendChild(anchor);
-    try {
-      anchor.click();
-    } finally {
-      anchor.remove();
-      // Mobile browsers may consume the URL after the click handler returns.
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    }
   }
 
   function exportDocument() {
@@ -15153,7 +15093,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     const ver = doc && doc.version ? `_v${doc.version}` : '';
     const mime = lang === 'csv' ? 'text/csv' : lang === 'json' ? 'application/json' : _isRichTextLang(lang) ? 'text/html' : 'text/plain';
     const blob = new Blob([textarea.value], { type: mime });
-    _downloadDocumentBlob(blob, safeName + ver + ext);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = safeName + ver + ext;
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   // "Import from device" — open a file picker, upload, and immediately open
@@ -15259,7 +15203,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
 
   function showExportMenu(e, anchorRect) {
     if (e) e.stopPropagation();
-    const anchor = e?.currentTarget || e?.target?.closest('button');
     // Remove existing menu if any (toggle off) — tear it down through its
     // registered dismiss so the outside-click listener + Escape-stack entry go.
     const existing = document.getElementById('doc-export-menu');
@@ -15296,8 +15239,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     menu.style.top = (rect.bottom + 2) + 'px';
     menu.style.right = (window.innerWidth - rect.right) + 'px';
     menu.style.left = 'auto';
-    const pane = document.querySelector('.doc-editor-pane');
-    menu.style.zIndex = String(Math.max(topPortalZ(), (pane && parseInt(getComputedStyle(pane).zIndex, 10) || 0) + 1));
+    menu.style.zIndex = '9999';
 
     const langLabel = lang ? lang.toUpperCase() : 'TXT';
     // Form-backed markdown doc → primary export is the filled PDF, not the
@@ -15331,11 +15273,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     // white paper preview; PDF is converted from its extracted text into an
     // editable DOCX in the browser.
     // PDF-backed documents already have a lossless filled-PDF export above.
-    // Running the generic html2pdf path would rebuild the extracted text and
+    // Running the generic browser print path would rebuild the extracted text and
     // destroy the original page layout, images, and form structure.
-    if (!isForm) {
+    if (!isForm && (_isDocxLang(lang) || typeof window.print === 'function')) {
       options.push({
-        label: _isDocxLang(lang) ? 'Convert to PDF' : 'Print as PDF',
+        label: _isDocxLang(lang) ? 'Convert to PDF' : 'Print / save PDF',
         fn: _isDocxLang(lang) ? () => convertOriginalDocument('pdf') : exportAsPdf,
       });
     }
@@ -15363,25 +15305,16 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     });
 
     document.body.appendChild(menu);
-    // Keep the footer menu inside the visible viewport, including with a keyboard open.
-    const viewport = window.visualViewport;
-    const left = (viewport?.offsetLeft || 0) + 8;
-    const top = (viewport?.offsetTop || 0) + 8;
-    const right = left + (viewport?.width || window.innerWidth) - 16;
-    const bottom = top + (viewport?.height || window.innerHeight) - 16;
-    menu.style.maxWidth = Math.max(0, right - left) + 'px';
-    menu.style.minWidth = '0';
-    menu.style.maxHeight = Math.max(0, bottom - top) + 'px';
-    menu.style.overflowY = 'auto';
+    // Flip above the anchor when there's no room below — the Export button now
+    // lives in the bottom footer, so the menu would otherwise drop off-screen.
     const mh = menu.offsetHeight;
-    const y = rect.bottom + 2 + mh <= bottom ? rect.bottom + 2 : rect.top - mh - 2;
-    menu.style.top = Math.max(top, Math.min(y, bottom - mh)) + 'px';
-    menu.style.left = Math.max(left, Math.min(rect.right - menu.offsetWidth, right - menu.offsetWidth)) + 'px';
-    menu.style.right = 'auto';
+    if (rect.bottom + mh > window.innerHeight - 8) {
+      menu.style.top = 'auto';
+      menu.style.bottom = (window.innerHeight - rect.top + 2) + 'px';
+    }
     // Outside-click AND Escape both route through the central esc-stack via
     // bindMenuDismiss; onClose owns the actual node removal.
-    const close = bindMenuDismiss(menu, () => { menu.remove(); },
-      ev => !menu.contains(ev.target) && !anchor?.contains(ev.target));
+    const close = bindMenuDismiss(menu, () => { menu.remove(); });
   }
 
   function _richTextExportCss() {
@@ -15441,7 +15374,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     const richStyles = _isRichTextLang(lang) ? `<style>${_richTextExportCss()}</style>` : '';
     const html = `<!DOCTYPE html>\n<html><head><meta charset="utf-8"><title>${_esc(title)}</title>${richStyles}</head><body style="max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.6;padding:0 20px;background:#fff;color:#000;">\n${body}\n</body></html>`;
     const blob = new Blob([html], { type: 'text/html' });
-    _downloadDocumentBlob(blob, _getExportBaseName() + '.html');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = _getExportBaseName() + '.html';
+    a.click();
+    URL.revokeObjectURL(a.href);
     if (uiModule) uiModule.showToast('Exported as HTML');
   }
 
@@ -15503,15 +15440,13 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     if (!activeDocId) return;
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
-    try {
-      await ensureHtml2Pdf();
-    } catch (e) {
-      if (uiModule) uiModule.showError('Failed to load PDF library');
+    if (typeof window.print !== 'function') {
+      if (uiModule) uiModule.showError('Browser printing is unavailable.');
       return;
     }
     const lang = document.getElementById('doc-language-select')?.value || '';
     const text = textarea.value || '';
-    // Render content as HTML for PDF
+    // Render content as HTML for the browser print dialog.
     let html;
     if (_isRichTextLang(lang)) {
       html = text;
@@ -15524,28 +15459,57 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       html = '<pre style="white-space:pre-wrap;font-size:11px;font-family:monospace;color:#000;background:#fff;">' +
         text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
     }
-    const container = document.createElement('div');
-    container.style.cssText = 'padding:20px;font-family:sans-serif;font-size:12px;color:#000;background:#fff;line-height:1.6;';
-    container.innerHTML = html;
-    if (_isRichTextLang(lang)) {
-      const style = document.createElement('style');
-      style.textContent = _richTextExportCss();
-      container.prepend(style);
+    // Use a sandboxed same-origin frame: rich text can render, but scripts,
+    // event handlers and embedded plugins cannot execute in the print view.
+    document.getElementById('doc-browser-print-frame')?.remove();
+    const frame = document.createElement('iframe');
+    frame.id = 'doc-browser-print-frame';
+    frame.title = 'Document print view';
+    frame.setAttribute('sandbox', 'allow-same-origin allow-modals');
+    frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:800px;height:600px;border:0;';
+    document.body.appendChild(frame);
+    try {
+      const printDoc = frame.contentDocument;
+      printDoc.open();
+      printDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>');
+      printDoc.close();
+      printDoc.title = _getExportBaseName();
+      const container = printDoc.createElement('div');
+      container.style.cssText = 'padding:20px;font-family:sans-serif;font-size:12px;color:#000;background:#fff;line-height:1.6;';
+      container.innerHTML = html;
+      if (_isRichTextLang(lang)) {
+        const style = printDoc.createElement('style');
+        style.textContent = _richTextExportCss();
+        container.prepend(style);
+      }
+      // Typeset deferred math before copying it into the print document.
+      await markdownModule.renderMath(container);
+      const styles = [];
+      document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+        if (!link.href.includes('/katex/')) return;
+        const copy = printDoc.createElement('link');
+        copy.rel = 'stylesheet';
+        copy.href = link.href;
+        styles.push(new Promise((resolve, reject) => {
+          copy.onload = resolve;
+          copy.onerror = () => reject(new Error('Math styles could not be loaded'));
+        }));
+        printDoc.head.appendChild(copy);
+      });
+      const printStyle = printDoc.createElement('style');
+      printStyle.textContent = '@page { margin: 10mm; } body { margin: 0; } img { max-width: 100%; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }';
+      printDoc.head.appendChild(printStyle);
+      printDoc.body.appendChild(printDoc.importNode(container, true));
+      await Promise.all(styles);
+      await printDoc.fonts.ready;
+      await Promise.all(Array.from(printDoc.images, img => img.decode().catch(() => {})));
+      frame.contentWindow.addEventListener('afterprint', () => frame.remove(), { once: true });
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+    } catch (error) {
+      frame.remove();
+      if (uiModule) uiModule.showError('Could not open browser print: ' + (error.message || error));
     }
-    // This container is detached, so the document-scoped flush mdToHtml
-    // schedules never sees it. Typeset the deferred math before html2pdf
-    // rasterises, or the PDF gets raw formula source. renderMath() returns
-    // immediately, without loading KaTeX, when there is nothing pending.
-    await markdownModule.renderMath(container);
-    const baseName = _getExportBaseName();
-    window.html2pdf().set({
-      margin: 10,
-      filename: baseName + '.pdf',
-      image: { type: 'jpeg', quality: 0.95 },
-      html2canvas: { scale: 2 },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    }).from(container).save();
-    if (uiModule) uiModule.showToast('Exporting PDF...');
   }
 
   function _docxHexColor(value) {
@@ -15989,7 +15953,11 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     });
     const blob = await window.docx.Packer.toBlob(doc);
     const baseName = _getExportBaseName();
-    _downloadDocumentBlob(blob, baseName + '.docx');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = baseName + '.docx';
+    a.click();
+    URL.revokeObjectURL(a.href);
     if (uiModule) uiModule.showToast('Exported as DOCX');
   }
 

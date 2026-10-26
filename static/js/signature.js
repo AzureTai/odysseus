@@ -465,7 +465,7 @@ export function pick(opts = {}) {
       if (!dataUrl) return '';
       return `
       <div class="sig-tile" data-id="${_esc(s.id)}">
-        <img src="${_esc(dataUrl)}" alt=""/>
+        <img src="${_esc(dataUrl)}"/>
         <div style="margin-top:4px;font-size:0.72rem;color:var(--fg);opacity:0.85;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(s.name || '')}</div>
         <button class="sig-tile-del" data-id="${_esc(s.id)}" title="Delete">×</button>
       </div>

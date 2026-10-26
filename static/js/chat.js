@@ -9,7 +9,7 @@ import Storage from './storage.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20260914metricssummary1';
-import chatStream from './chatStream.js?v=20260914pdfstrip1';
+import chatStream from './chatStream.js?v=20261016tasks1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
@@ -88,7 +88,7 @@ import { invalidateSettings } from './appConfig.js';
       btn.disabled = true;
       try {
         if (typeof window.gePhotoEditorApply !== 'function') {
-          await import('/static/js/galleryEditor.js');
+          await import('/static/js/galleryEditor.js?v=20260909movepicklayer1');
         }
         await window.gePhotoEditorApply({
           imageId: null,
@@ -125,6 +125,8 @@ import { invalidateSettings } from './appConfig.js';
   let _contextHeaderAnchorEl = null;
   let _contextHeaderPopupCleanup = null;
   let _pendingToolApproval = null;
+  const _selectedNoteIdsBySession = new Map();
+  let _pendingSelectedNoteIds = [];
   let _lastPrivateBrowserUrl = '';
   function _isPrivateBrowserTool(tool) {
     const name = String(tool || '').toLowerCase();
@@ -300,6 +302,46 @@ import { invalidateSettings } from './appConfig.js';
     _submitToolApprovalWhenIdle(_pendingToolApproval.approval_id);
   });
 
+  window.addEventListener('odysseus:notes-context-selected', (event) => {
+    const noteIds = event.detail?.noteIds;
+    if (!Array.isArray(noteIds) || noteIds.length === 0) return;
+
+    const sessionId = sessionModule.getCurrentSessionId?.();
+    if (!sessionId && !sessionModule.hasPendingChat?.()) {
+      console.warn('Cannot attach Notes context: no active or pending chat');
+      return;
+    }
+
+    if (sessionId) {
+      _selectedNoteIdsBySession.set(sessionId, [...noteIds]);
+    } else {
+      _pendingSelectedNoteIds = [...noteIds];
+    }
+    if (event.detail) event.detail.accepted = true;
+    _renderSelectedNotesIndicator(noteIds);
+  });
+
+  window.addEventListener('odysseus:session-changed', (event) => {
+    const sessionId = event.detail?.sessionId;
+    if (sessionId && event.detail?.materialized && _pendingSelectedNoteIds.length) {
+      _selectedNoteIdsBySession.set(sessionId, _pendingSelectedNoteIds);
+    }
+    _pendingSelectedNoteIds = [];
+    _renderSelectedNotesIndicator(
+      sessionId ? (_selectedNoteIdsBySession.get(sessionId) || []) : []
+    );
+  });
+
+  document.getElementById('selected-notes-context-btn')?.addEventListener('click', () => {
+    const sessionId = sessionModule.getCurrentSessionId?.();
+    if (sessionId) {
+      _selectedNoteIdsBySession.delete(sessionId);
+    } else {
+      _pendingSelectedNoteIds = [];
+    }
+    _renderSelectedNotesIndicator([]);
+  });
+
   function _fmtContextNumber(n) {
     const v = Number(n || 0);
     return v ? v.toLocaleString() : '?';
@@ -350,6 +392,26 @@ import { invalidateSettings } from './appConfig.js';
     return Math.max(50, Math.min(95, Math.round(n)));
   }
 
+  function _renderSelectedNotesIndicator(noteIds){
+    const button = document.getElementById('selected-notes-context-btn');
+    const count = document.getElementById('selected-notes-context-count');
+
+    if (!button || !count) return;
+
+    const total = Array.isArray(noteIds) ? noteIds.length : 0;
+    if(!total){
+      button.style.display = 'none';
+      count.textContent = '';
+      return;
+    }
+    count.textContent = `${total} note${total === 1 ? '' : 's'} selected`;
+    button.style.display = '';
+    button.title = `${total} selected Note/Todo${total === 1 ? '' : 's'} — click to clear`;
+    button.setAttribute(
+      'aria-label',
+      `Clear ${total} selected Note/Todo${total === 1 ? '' : 's'} context`
+    );
+  }
   function _liveSessionModule() {
     return (window.sessionModule && window.sessionModule.getCurrentSessionId)
       ? window.sessionModule
@@ -2557,6 +2619,12 @@ import { invalidateSettings } from './appConfig.js';
       const fd = new FormData();
       fd.append('message', approvalForSend ? '' : _finalMsgWithInject);
       fd.append('session', streamSessionId);
+
+      const selectedNoteIds = _selectedNoteIdsBySession.get(streamSessionId) || [];
+      if(selectedNoteIds.length){
+        fd.append('selected_note_ids', JSON.stringify(selectedNoteIds))
+      }
+
       if (approvalForSend) {
         fd.append('tool_approval_id', approvalForSend.approval_id);
         fd.append('tool_approval_decision', approvalForSend.decision);
@@ -6928,13 +6996,6 @@ import { invalidateSettings } from './appConfig.js';
             }, 200);
           }
         });
-      }
-      // Smooth viewport resize when keyboard opens/closes
-      if (window.visualViewport) {
-        window.visualViewport.addEventListener('resize', () => {
-          document.documentElement.style.setProperty('--vh', window.visualViewport.height + 'px');
-        });
-        document.documentElement.style.setProperty('--vh', window.visualViewport.height + 'px');
       }
     }
 

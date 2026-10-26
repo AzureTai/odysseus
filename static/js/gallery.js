@@ -1404,7 +1404,7 @@ function _renderGrid() {
   // tile in the Albums tab so the upload entry point is consistent across
   // both grids.
   const uploadTile = `
-    <div class="gallery-card gallery-card-upload" id="gallery-upload-tile" title="Upload photos or videos" tabindex="0" role="button" aria-label="Upload photos or videos">
+    <div class="gallery-card gallery-card-upload" id="gallery-upload-tile" title="Upload photos or videos">
       <div class="gallery-card-upload-inner">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         <div class="gallery-card-upload-label">Upload</div>
@@ -1443,10 +1443,10 @@ function _renderGrid() {
       _isVideoUrl(img.url) ? '<span class="gallery-card-badge">Video</span>' : '',
     ].filter(Boolean).join('');
     html += `
-      <div class="gallery-card" data-id="${_esc(img.id)}" tabindex="0" role="button" aria-label="${_esc(labelText)}">
+      <div class="gallery-card" data-id="${_esc(img.id)}">
         <span class="gallery-select-dot" style="display:none;"></span>
-        <button class="gallery-fav-btn${favCls}" data-id="${_esc(img.id)}" title="Favorite" aria-label="Favorite" aria-pressed="${favCls ? 'true' : 'false'}">&#9829;</button>
-        <button class="gallery-dl-btn" data-id="${_esc(img.id)}" data-url="${_esc(img.url)}" data-filename="${_esc(img.filename || '')}" title="Download" aria-label="Download">
+        <button class="gallery-fav-btn${favCls}" data-id="${_esc(img.id)}" title="Favorite">&#9829;</button>
+        <button class="gallery-dl-btn" data-id="${_esc(img.id)}" data-url="${_esc(img.url)}" data-filename="${_esc(img.filename || '')}" title="Download">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </button>
         ${_isVideoUrl(img.url)
@@ -1611,7 +1611,7 @@ function _openDetail(img) {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="${img.favorite ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
       </button>
       <div class="gallery-detail-menu-wrap">
-        <button class="gallery-detail-action gallery-detail-menu-btn" id="gallery-detail-menu-btn" title="Actions" aria-label="Photo actions" aria-haspopup="menu" aria-expanded="false">
+        <button class="gallery-detail-action gallery-detail-menu-btn" id="gallery-detail-menu-btn" title="Actions" aria-label="Photo actions">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
         </button>
         <div class="gallery-detail-menu dropdown" id="gallery-detail-menu" hidden>
@@ -1840,7 +1840,7 @@ function _openDetail(img) {
   const menu = document.getElementById('gallery-detail-menu');
   if (menuBtn && menu) {
     // `.dropdown { display:none }` isn't tied to [hidden] — set inline display.
-    const _setMenu = (show) => { menu.hidden = !show; menu.style.display = show ? 'block' : 'none'; menuBtn.setAttribute('aria-expanded', show ? 'true' : 'false'); };
+    const _setMenu = (show) => { menu.hidden = !show; menu.style.display = show ? 'block' : 'none'; };
     _setMenu(false);
     menuBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -2271,7 +2271,7 @@ export function openGallery() {
     <div class="modal-content gallery-modal-content">
       <div class="modal-header">
         <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Gallery <span id="gallery-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal;margin-left:8px"></span></h4>
-        <button class="modal-close" id="gallery-close" aria-label="Close">&times;</button>
+        <button class="modal-close" id="gallery-close">&times;</button>
       </div>
       <div class="gallery-tabs">
         <button class="gallery-tab active" data-tab="images">
@@ -2402,6 +2402,9 @@ export function openGallery() {
   if (editorTabClose) {
     editorTabClose.addEventListener('click', async (e) => {
       e.stopPropagation();
+      // With several document tabs open the × closes only the active one and
+      // switches to its neighbour; the editor itself stays open.
+      if (window.geEditorCloseActiveDocument?.()) return;
       if (isEditorOpen()) {
         const ok = await uiModule.styledConfirm(
           'Close the edit? Any unsaved changes will be lost.',

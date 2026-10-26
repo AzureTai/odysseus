@@ -191,7 +191,7 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
         appendMode = null; // whatever was streaming is now frozen
         tailShownLen = 0;
       }
-      scheduleTailRender(fullText.slice(committedLen));
+      renderTail(fullText.slice(committedLen));
     } catch (err) {
       degraded = true;
       console.error('streamingRenderer: falling back to full render', err);

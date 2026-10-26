@@ -45,6 +45,16 @@ function _editorPanelVisible() {
 
 function _positionToastForOpenPanel(el) {
   if (!el) return;
+  // The Free Transform hint is pinned by CSS to one fixed spot under the
+  // canvas; letting the panel rules move it made it hop between the top-right
+  // corner and the bottom banner depending on which panel happened to be open.
+  if (el.classList.contains('toast-transform-hint')) {
+    el.classList.remove('toast-editor-bottom', 'toast-panel-offset');
+    el.style.left = '';
+    el.style.right = '';
+    el.style.maxWidth = '';
+    return;
+  }
   const vw = window.innerWidth || document.documentElement.clientWidth || 0;
   el.classList.remove('toast-editor-bottom');
   // In the editor, a floating panel (Adjust/Develop, FX, Transform, filter
@@ -198,7 +208,9 @@ function _closeHoveredWindow() {
 function _spaceIsBlocked(e, surface) {
   const target = _targetEl(e.target);
   if (!target) return false;
-  if (_isTextEditingTarget(target)) return !surface || surface.contains(target);
+  // Space must always type in a field, even when that field lives in a fixed
+  // overlay outside the hovered surface (e.g. the editor's on-canvas text box).
+  if (_isTextEditingTarget(target)) return true;
   const blocked = target.closest?.(SPACE_BLOCKED_SELECTOR);
   return !!(blocked && (!surface || surface.contains(blocked)));
 }
@@ -245,6 +257,10 @@ function _initHoverCardSpaceToggle() {
   }, true);
   document.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' || e.repeat) return;
+    // The image editor owns Space (hold to pan, otherwise text fields type a
+    // space). A card/window toggle must never fire while it is open, or the
+    // hovered gallery card can click itself closed underneath the editor.
+    if (document.body?.classList.contains('ge-editor-open')) return;
     if (hoveredToggleCard && _isSpaceVisible(hoveredToggleCard)) {
       if (_spaceIsBlocked(e, hoveredToggleCard)) return;
       e.preventDefault();
@@ -366,7 +382,7 @@ export function showToast(msg, durationOrOpts) {
   _wireToastSwipe(toastEl);
   toastEl.textContent = '';
   toastEl.classList.remove('error');
-  toastEl.classList.remove('toast-ai-reply-progress', 'toast-ai-reply-result', 'toast-sending', 'toast-message-sent');
+  toastEl.classList.remove('toast-ai-reply-progress', 'toast-ai-reply-result', 'toast-sending', 'toast-message-sent', 'toast-transform-hint');
 
   let duration = 1200, actionLabel = null, onAction = null, actionHint = null, actionIcon = null, leadingIcon = null, toastClass = null, aiReplyProgress = false, aiReplyResult = false;
   if (typeof durationOrOpts === 'object' && durationOrOpts) {
@@ -505,6 +521,7 @@ export function showError(msg) {
   _wireToastSwipe(toastEl);
   toastEl.textContent = '';
   toastEl.classList.add('error');
+  toastEl.classList.remove('toast-transform-hint');
   toastEl.style.pointerEvents = '';
   toastEl.style.transform = '';
   toastEl.classList.remove('exiting');

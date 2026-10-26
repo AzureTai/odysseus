@@ -582,7 +582,7 @@ export async function refreshModels(force = false, opts = {}) {
       noModels.className = 'models-empty-state';
       if (window._isAdmin) {
         noModels.innerHTML = '<span class="muted">No models found</span><br>'
-          + '<a href="#" id="models-open-admin" class="accent-link">Open Admin to add endpoints</a>'
+          + '<a href="#" onclick="document.getElementById(\'user-bar-admin\')?.click();return false;" class="accent-link">Open Admin to add endpoints</a>'
           + '<br><span class="muted-sm">Type /setup for Local models or API setup.</span>';
       } else {
         noModels.innerHTML = '<span class="muted">No models available</span><br>'
