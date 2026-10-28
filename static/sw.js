@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v659-notes-reference';
+const CACHE_NAME = 'odysseus-v660-compare-stream-events';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -90,6 +90,7 @@ const PRECACHE = [
   '/static/js/search-chat.js',
   '/static/js/compare/index.js?v=20260909mobilepaneaddscroll1',
   '/static/js/compare/vote.js?v=20260828resendcaldrag1',
+  '/static/js/compare/sse.js',
   '/static/js/colorPicker.js?v=20260910eyedropper1',
   '/static/js/panels.js?v=20260909movepicklayer1',
   '/static/js/theme.js?v=20260911organsrain1',
