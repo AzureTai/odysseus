@@ -5197,7 +5197,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
   }
 
   async function _handleAttachUpload(e) {
-    const files = e.target.files;
+    const files = Array.from(e.target.files || []);
     e.target.value = ''; // reset for next upload
     await _uploadComposeFiles(files);
   }
