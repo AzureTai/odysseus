@@ -5928,7 +5928,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
   }
 
   async function _handleMarkdownImageUpload(e) {
-    const files = e.target.files;
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
     await _uploadMarkdownImages(files);
   }
