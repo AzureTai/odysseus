@@ -17,6 +17,8 @@ def route(name):
 
 def call(name, monkeypatch, body):
     monkeypatch.setattr(gallery, 'require_privilege', lambda *args: 'alice')
+    monkeypatch.setattr(gallery, '_local_image_models_enabled', lambda: True)
+    monkeypatch.setattr(gallery, '_remote_image_ops_base', lambda: '')
 
     class Request:
         async def json(self):
