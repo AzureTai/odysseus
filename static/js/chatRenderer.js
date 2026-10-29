@@ -3277,7 +3277,6 @@ export function addMessage(role, content, modelName, metadata) {
       let lastWrap = null;
       let firstMsgAi = null;
       let lastMsgAi = null;
-      const newNodes = [];
 
       const toolsByRound = {};
       let lastPrivateBrowserUrl = '';
@@ -3371,7 +3370,6 @@ export function addMessage(role, content, modelName, metadata) {
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
           box.appendChild(wrap);
-          newNodes.push(wrap);
           lastWrap = wrap;
           if (!firstMsgAi) firstMsgAi = wrap;
           lastMsgAi = wrap;
@@ -3389,7 +3387,6 @@ export function addMessage(role, content, modelName, metadata) {
             // Extend line up if there's a chat bubble above
             if (txt) threadWrap.classList.add('has-top');
             box.appendChild(threadWrap);
-            newNodes.push(threadWrap);
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
@@ -3451,7 +3448,6 @@ export function addMessage(role, content, modelName, metadata) {
             if (image) {
               const imgBubble = buildImageBubble(image.image_url, image.image_prompt, image.image_model, image.image_size, image.image_quality, image.image_id);
               box.appendChild(imgBubble);
-              newNodes.push(imgBubble);
             }
           }
         }

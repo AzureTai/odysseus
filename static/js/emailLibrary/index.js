@@ -5021,7 +5021,7 @@ export async function _refreshUnreadBadge({ unreadCountOverride = null, preserve
   } catch (_) { _syncUnreadTabBadge(0); }
 }
 
-export async function _loadEmails({ force = false, useCache = true } = {}) {
+export async function _loadEmails({ force = false, useCache = true, skipFastPath = false } = {}) {
   const seq = ++_libLoadSeq;
   state._libLoading = true;
   const accountAtStart = state._libAccountId || '';
@@ -5119,7 +5119,7 @@ export async function _loadEmails({ force = false, useCache = true } = {}) {
       const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
       const attQS = hasAttachmentsAtStart ? '&has_attachments=1' : '';
       const dateQS = `${dateFromAtStart ? `&date_from=${encodeURIComponent(dateFromAtStart)}` : ''}${dateToAtStart ? `&date_to=${encodeURIComponent(dateToAtStart)}` : ''}`;
-      if (!cached && cacheable && !force) {
+      if (!cached && cacheable && !force && !skipFastPath) {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 450);
         try {

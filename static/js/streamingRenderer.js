@@ -36,6 +36,7 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   let degraded = !ENABLED; // true once we fall back to full re-render
   let tailRaf = null; // pending requestAnimationFrame id for the live-tail re-render
   let pendingTail = ''; // most recent tail text awaiting a rAF re-render
+  let tailGeneration = 0;
 
   function start() {
     contentEl.textContent = '';
@@ -88,13 +89,21 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   function scheduleTailRender(tailText) {
     pendingTail = tailText;
     if (tailRaf !== null) return;
+    const generation = tailGeneration;
     tailRaf = requestAnimationFrame(() => {
+      if (generation !== tailGeneration) return;
       tailRaf = null;
       // The container may have been rewritten out from under us (chat.js writes
       // contentEl.innerHTML for thinking indicators and tool blocks). Skip and
       // let the next update() self-heal rather than appending stale tail nodes.
       if (tailMarker && tailMarker.parentNode === contentEl) {
-        renderTail(pendingTail);
+        try {
+          renderTail(pendingTail);
+        } catch (err) {
+          degraded = true;
+          console.error('streamingRenderer: falling back to full render in rAF', err);
+          safeFullRender(lastText);
+        }
       }
     });
   }
@@ -157,6 +166,41 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
     highlight(contentEl);
   }
 
+  function safeFullRender(fullText) {
+    try {
+      fullRender(fullText);
+    } catch (err) {
+      // The source survives even when the parser/highlighter is unavailable.
+      // textContent also ensures that untrusted message text stays inert.
+      console.error('streamingRenderer: preserving source as plain text', err);
+      contentEl.textContent = fullText;
+    }
+  }
+
+  function cancelPendingTail() {
+    tailGeneration++;
+    if (tailRaf !== null) {
+      cancelAnimationFrame(tailRaf);
+      tailRaf = null;
+    }
+    pendingTail = '';
+  }
+
+  function resetDom() {
+    cancelPendingTail();
+    started = false;
+    tailMarker = null;
+    committedLen = 0;
+    tailShownLen = 0;
+    appendMode = null;
+  }
+
+  function reset() {
+    resetDom();
+    lastText = '';
+    degraded = !ENABLED;
+  }
+
   // Render the latest full source text.
   //
   // PRECONDITION: callers must pass append-only text — each call's `fullText` must
@@ -168,7 +212,8 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   function update(fullText) {
     lastText = fullText;
     if (degraded) {
-      fullRender(fullText);
+      cancelPendingTail();
+      safeFullRender(fullText);
       return;
     }
     try {
@@ -178,24 +223,34 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
       // container. Rebuild from scratch so we never append onto foreign content or
       // touch a detached marker.
       if (started && (!tailMarker || tailMarker.parentNode !== contentEl)) {
-        started = false;
-        committedLen = 0;
-        tailShownLen = 0;
-        appendMode = null;
+        resetDom();
       }
       if (!started) start();
       const next = splitFinalized(fullText, render, committedLen);
       if (next > committedLen) {
+        cancelPendingTail();
+        clearTail();
         freeze(fullText.slice(committedLen, next));
         committedLen = next;
         appendMode = null; // whatever was streaming is now frozen
         tailShownLen = 0;
       }
-      renderTail(fullText.slice(committedLen));
+      const tail = fullText.slice(committedLen);
+      if (!tail) {
+        cancelPendingTail();
+        clearTail();
+        tailShownLen = 0;
+      } else if (tailShownLen === 0) {
+        cancelPendingTail();
+        renderTail(tail);
+      } else {
+        scheduleTailRender(tail);
+      }
     } catch (err) {
+      cancelPendingTail();
       degraded = true;
       console.error('streamingRenderer: falling back to full render', err);
-      fullRender(fullText);
+      safeFullRender(fullText);
     }
   }
 
@@ -205,9 +260,12 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   // reasons and so doesn't call this, but it completes the renderer's lifecycle and
   // is exercised by the tests.
   function finalize() {
-    if (degraded) return;
+    cancelPendingTail();
+    if (degraded) {
+      safeFullRender(lastText);
+      return;
+    }
     try {
-      if (tailRaf !== null) { cancelAnimationFrame(tailRaf); tailRaf = null; }
       if (!started) start();
       clearTail();
       appendMode = null;
@@ -219,9 +277,9 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
     } catch (err) {
       degraded = true;
       console.error('streamingRenderer: falling back to full render', err);
-      fullRender(lastText);
+      safeFullRender(lastText);
     }
   }
 
-  return { update, finalize };
+  return { update, finalize, reset };
 }

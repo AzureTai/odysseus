@@ -435,11 +435,11 @@ def setup_upload_routes(upload_handler):
             logger.error(f"Failed to get upload stats: {e}")
             raise HTTPException(500, "Failed to get upload statistics")
 
-    @router.get("/{file_id}")
+    @router.api_route("/{file_id}", methods=["GET", "HEAD"])
     async def download_file(request: Request, file_id: str, thumb: int = 0):
-        """Serve an uploaded file by its ID. `?thumb=1` returns a small cached
-        JPEG thumbnail for images (used by chat attachment previews) so the
-        client isn't downloading the full-resolution photo just to show it tiny."""
+        """Serve an uploaded file by its ID or probe via HEAD. `?thumb=1` returns
+        a small cached JPEG thumbnail for images (used by chat attachment previews)
+        so the client isn't downloading the full-resolution photo just to show it tiny."""
         if not upload_handler.validate_upload_id(file_id):
             raise HTTPException(400, "Invalid file ID")
         import mimetypes as _mt
@@ -458,29 +458,42 @@ def setup_upload_routes(upload_handler):
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or "application/octet-stream"
         from fastapi.responses import FileResponse
         # Downscaled thumbnail for image previews — generated once and cached.
+        # Skip generation during HEAD probe to avoid loading/processing whole image.
         if thumb and mime.startswith("image/"):
-            try:
-                from PIL import Image, ImageOps
-                thumb_dir = os.path.join(_upload_root(), ".thumbs")
-                os.makedirs(thumb_dir, exist_ok=True)
-                thumb_path = os.path.join(thumb_dir, file_id + ".jpg")
-                if (not os.path.exists(thumb_path)
-                        or os.path.getmtime(thumb_path) < os.path.getmtime(path)):
-                    im = Image.open(path)
-                    # iPhone / camera JPEGs encode rotation in EXIF rather than
-                    # the pixel data. Browsers honour that on the original via
-                    # image-orientation:from-image, but PIL strips EXIF when it
-                    # saves the JPEG thumb, leaving the pixels sideways. Bake
-                    # the rotation into the pixels before thumbnailing.
-                    im = ImageOps.exif_transpose(im)
-                    im.thumbnail((320, 320))
-                    if im.mode not in ("RGB", "L"):
-                        im = im.convert("RGB")
-                    im.save(thumb_path, "JPEG", quality=80)
-                return FileResponse(thumb_path, media_type="image/jpeg", headers=UPLOAD_RESPONSE_HEADERS)
-            except Exception as e:
-                logger.warning(f"Thumbnail generation failed for {file_id}: {e}")
-                # Fall through to the full image.
+            thumb_dir = os.path.join(_upload_root(), ".thumbs")
+            thumb_path = os.path.join(thumb_dir, file_id + ".jpg")
+            if request.method == "HEAD":
+                if (os.path.isfile(thumb_path)
+                        and os.path.getmtime(thumb_path) >= os.path.getmtime(path)):
+                    return FileResponse(thumb_path, media_type="image/jpeg", headers=UPLOAD_RESPONSE_HEADERS)
+                # GET may generate a JPEG or fall back to the original on failure.
+                # Neither representation is known without decoding the image. HEAD
+                # must not advertise the original/stale file's headers as a thumb.
+                from fastapi.responses import Response
+                response = Response(status_code=200, headers=UPLOAD_RESPONSE_HEADERS)
+                del response.headers["content-length"]
+                return response
+            else:
+                try:
+                    from PIL import Image, ImageOps
+                    os.makedirs(thumb_dir, exist_ok=True)
+                    if (not os.path.exists(thumb_path)
+                            or os.path.getmtime(thumb_path) < os.path.getmtime(path)):
+                        im = Image.open(path)
+                        # iPhone / camera JPEGs encode rotation in EXIF rather than
+                        # the pixel data. Browsers honour that on the original via
+                        # image-orientation:from-image, but PIL strips EXIF when it
+                        # saves the JPEG thumb, leaving the pixels sideways. Bake
+                        # the rotation into the pixels before thumbnailing.
+                        im = ImageOps.exif_transpose(im)
+                        im.thumbnail((320, 320))
+                        if im.mode not in ("RGB", "L"):
+                            im = im.convert("RGB")
+                        im.save(thumb_path, "JPEG", quality=80)
+                    return FileResponse(thumb_path, media_type="image/jpeg", headers=UPLOAD_RESPONSE_HEADERS)
+                except Exception as e:
+                    logger.warning(f"Thumbnail generation failed for {file_id}: {e}")
+                    # Fall through to the full image.
         return FileResponse(
             path,
             media_type=mime,

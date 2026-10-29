@@ -1,11 +1,28 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
+const origin = process.env.ODYSSEUS_TEST_STATIC_ORIGIN || 'http://127.0.0.1:7011';
 const browser = await chromium.launch({ headless: true });
 try {
   for (const width of [390, 900]) {
     const page = await browser.newPage({ viewport: { width, height: 844 }, acceptDownloads: true });
-    await page.goto('http://127.0.0.1:7011/static/js/documentStats.js');
+    if (!process.env.ODYSSEUS_TEST_STATIC_ORIGIN) {
+      await page.route(`${origin}/**`, async route => {
+        const url = new URL(route.request().url());
+        const rel = url.pathname.replace(/^\//, '');
+        try {
+          const file = new URL('../' + rel, import.meta.url);
+          const body = await readFile(file);
+          const ext = rel.split('.').pop();
+          const type = ext === 'css' ? 'text/css' : ext === 'js' ? 'text/javascript' : 'application/octet-stream';
+          return route.fulfill({ contentType: type, body });
+        } catch {
+          return route.fulfill({ status: 404, body: 'Not found' });
+        }
+      });
+    }
+    await page.goto(`${origin}/static/js/documentStats.js`);
     await page.setContent('<link rel="stylesheet" href="/static/css/00-tokens.css"><div id="toast"></div><div id="chat-container"></div><div id="sidebar"></div>');
     await page.evaluate(async () => {
       const mod = await import('/static/js/document.js?mobile-export-regression=1');
