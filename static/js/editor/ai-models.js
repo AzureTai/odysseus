@@ -140,12 +140,41 @@ export function modelCaps(modelId, endpointName, endpointType) {
   return { gen: false, inpaint: false };
 }
 
-export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2img }) {
+// Global listeners resolve live controls instead of retaining editor instances.
+function syncCommandModel(value) {
+  const select = document.getElementById('ge-ai-command-model');
+  if (!select || !select._modelsReady) return;
+  if (value && ![...select.options].some(o => !o.disabled && o.value === value && value !== '__serve_cookbook__')) {
+    if (localStorage.getItem('ge-ai-command-model') === value) localStorage.removeItem('ge-ai-command-model');
+    value = '';
+  }
+  if (select.value !== value) {
+    select.value = value;
+    if (select.value !== value) select.value = '';
+    updateFooterEditModel();
+  }
+}
+window.addEventListener('ge-ai-command-model-change', e => syncCommandModel(e.detail?.value || ''));
+window.addEventListener('storage', e => {
+  if (e.key === 'ge-ai-command-model') syncCommandModel(e.newValue || '');
+});
+window.addEventListener('ge:model-endpoints-updated', e => {
+  document.getElementById('ge-ai-command-model')?._refreshAIModels?.(e.detail?.baseUrl || '');
+});
+
+export function wireAIModelSelectors({ container, apiBase = '', openCookbookForImg2img = () => {} } = {}) {
+  const root = container || document;
+  root._aiModelListeners?.abort();
+  const listeners = new AbortController();
+  root._aiModelListeners = listeners;
+  const listen = (target, type, handler, options = {}) => target?.addEventListener(type, handler, {
+    ...(typeof options === 'boolean' ? { capture: options } : options), signal: listeners.signal,
+  });
   // Delegated handler for the "+ Serve a model in Cookbook…" sentinel
   // option — catches clicks regardless of whether loadAIModels has
   // rewired the individual select yet and survives any innerHTML
   // reset later.
-  container.addEventListener('change', (e) => {
+  listen(root, 'change', (e) => {
     const sel = e.target.closest('select');
     if (!sel) return;
     if (sel.value !== '__serve_cookbook__') return;
@@ -155,7 +184,7 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
     openCookbookForImg2img();
   });
   // Track prior value so we can restore it after the sentinel fires.
-  container.addEventListener('focus', (e) => {
+  listen(root, 'focus', (e) => {
     const sel = e.target.closest('select');
     if (sel && sel.value !== '__serve_cookbook__') sel._prevServeValue = sel.value;
   }, true);
@@ -164,8 +193,7 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
   const aiInpaintSelect = document.getElementById('ge-ai-inpaint');
   const aiCommandSelect = document.getElementById('ge-ai-command-model');
   const aiCommandAgentSelect = document.getElementById('ge-ai-command-agent-model');
-  if (aiInpaintSelect) aiInpaintSelect.addEventListener('change', () => updateFooterEditModel());
-  if (aiCommandSelect) aiCommandSelect.addEventListener('change', () => updateFooterEditModel());
+  if (aiInpaintSelect) listen(aiInpaintSelect, 'change', () => updateFooterEditModel());
   // The Quick Edit agent (planner) picker: dynamically populates from
   // /api/editor/agent-models; restore/save choice from localStorage.
   const populateAgentSelect = async () => {
@@ -176,9 +204,10 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       const res = await fetch(`${apiBase}/api/editor/agent-models`);
       if (res.ok) {
         const data = await res.json();
+        if (listeners.signal.aborted || !root.isConnected) return;
         const serverModels = data.models || [];
         for (const m of serverModels) {
-          const optVal = `${m.source === 'local' ? 'local' : (m.endpoint_id ? String(m.endpoint_id) : (m.base_url || ''))}::${m.id}`;
+          const optVal = `${m.source === 'local' ? 'local' : (m.endpoint_id ? String(m.endpoint_id) : '')}::${m.id}`;
           const label = m.label || m.id;
           if (!agentOptions.some(o => o.value === optVal)) {
             agentOptions.push({ value: optVal, label });
@@ -202,9 +231,9 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
         aiCommandAgentSelect.value = prevVal;
       }
     } catch {}
-    if (!aiCommandAgentSelect._agentWired) {
-      aiCommandAgentSelect._agentWired = true;
-      aiCommandAgentSelect.addEventListener('change', () => {
+    if (aiCommandAgentSelect._agentWired !== listeners) {
+      aiCommandAgentSelect._agentWired = listeners;
+      listen(aiCommandAgentSelect, 'change', () => {
         try { localStorage.setItem('ge-ai-command-agent-model', aiCommandAgentSelect.value); } catch {}
       });
     }
@@ -222,8 +251,10 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       const prevGenValue = aiGenSelect?.value || '';
       const prevInpaintValue = aiInpaintSelect?.value || '';
       const res = await fetch(`${apiBase}/api/editor/image-models`);
+      if (listeners.signal.aborted || !root.isConnected) return;
       if (!res.ok) throw new Error(`Could not load image models (${res.status})`);
       const data = await res.json();
+      if (listeners.signal.aborted || !root.isConnected) return;
       const modelsList = data.models || [];
       if (aiGenSelect) aiGenSelect.innerHTML = '<option value="">None</option>';
       if (aiInpaintSelect) aiInpaintSelect.innerHTML = '<option value="">Auto</option>';
@@ -241,8 +272,8 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
         const canInpaint = Boolean(caps.inpaint || m.kind === 'edit');
         if (!canGen && !canInpaint) continue;
 
-        // Use opaque endpoint_id if available; fallback to provider name or base_url for admin
-        const endpointKey = m.endpoint_id ? String(m.endpoint_id) : (m.base_url || '');
+        // Use opaque endpoint_id if available; never fall back to raw base_url
+        const endpointKey = m.endpoint_id ? String(m.endpoint_id) : (m.source === 'local' ? 'local' : '');
         const value = endpointKey ? `${endpointKey}::${modelId}` : modelId;
         const shortModel = modelId ? String(modelId).split('/').pop() : (m.label || m.provider);
         const epHint = m.provider && m.provider !== modelId && m.provider !== 'image' ? ` · ${m.provider}` : '';
@@ -312,32 +343,50 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       if (aiGenSelect) appendServeSentinel(aiGenSelect);
       if (aiInpaintSelect) appendServeSentinel(aiInpaintSelect);
       if (aiCommandSelect) appendServeSentinel(aiCommandSelect);
-      // Wire the sentinel on the Gen + Inpaint selects too.
-      const wireServeSentinel = (sel) => {
-        if (!sel) return;
-        let prev = sel.value;
-        sel.addEventListener('change', () => {
-          if (sel.value === '__serve_cookbook__') {
-            sel.value = prev;
-            openCookbookForImg2img();
-            return;
-          }
-          prev = sel.value;
-        });
-      };
-      wireServeSentinel(aiGenSelect);
-      wireServeSentinel(aiInpaintSelect);
-      wireServeSentinel(aiCommandSelect);
+      // Sentinel changes are handled by the component's delegated listener.
       if (aiCommandSelect) {
+        aiCommandSelect._modelsReady = true;
         try {
-          const saved = localStorage.getItem('ge-ai-command-model');
-          if (saved && [...aiCommandSelect.options].some(o => o.value === saved)) aiCommandSelect.value = saved;
+          const rawSaved = localStorage.getItem('ge-ai-command-model') || '';
+          let saved = rawSaved;
+          if (saved.startsWith('http://') || saved.startsWith('https://') || saved.includes('://') || saved.startsWith('::')) {
+            const modelPart = saved.includes('::') ? saved.split('::').pop() : '';
+            const matching = loaded.filter(l => l.model === modelPart);
+            if (matching.length === 1) {
+              saved = matching[0].value;
+            } else {
+              saved = '';
+            }
+            try {
+              if (saved) localStorage.setItem('ge-ai-command-model', saved);
+              else localStorage.removeItem('ge-ai-command-model');
+            } catch {}
+          }
+          if (saved && [...aiCommandSelect.options].some(o => o.value === saved)) {
+            aiCommandSelect.value = saved;
+          } else {
+            aiCommandSelect.value = '';
+          }
+          if (aiCommandSelect.value !== rawSaved) {
+            if (aiCommandSelect.value) localStorage.setItem('ge-ai-command-model', aiCommandSelect.value);
+            else localStorage.removeItem('ge-ai-command-model');
+            window.dispatchEvent(new CustomEvent('ge-ai-command-model-change', { detail: { value: aiCommandSelect.value } }));
+          }
         } catch {}
-        aiCommandSelect.addEventListener('change', () => {
-          if (aiCommandSelect.value === '__serve_cookbook__') return;
-          try { localStorage.setItem('ge-ai-command-model', aiCommandSelect.value); } catch {}
-          updateFooterEditModel();
-        });
+
+        if (aiCommandSelect._commandWired !== listeners) {
+          aiCommandSelect._commandWired = listeners;
+          listen(aiCommandSelect, 'change', () => {
+            if (aiCommandSelect.value === '__serve_cookbook__') return;
+            const val = aiCommandSelect.value || '';
+            try {
+              if (val) localStorage.setItem('ge-ai-command-model', aiCommandSelect.value);
+              else localStorage.removeItem('ge-ai-command-model');
+            } catch {}
+            updateFooterEditModel();
+            window.dispatchEvent(new CustomEvent('ge-ai-command-model-change', { detail: { value: val } }));
+          });
+        }
       }
       // Restore each per-tool selection from localStorage.
       for (const ts of perToolSelects) {
@@ -349,7 +398,7 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
           }
         } catch {}
         let prevValue = ts.value;
-        ts.addEventListener('change', () => {
+        listen(ts, 'change', () => {
           if (ts.value === '__serve_cookbook__') {
             ts.value = prevValue;
             openCookbookForImg2img();
@@ -362,6 +411,7 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       _aiModelsStatus = { ready: true, models: loaded, error: null, at: Date.now() };
       try { window.dispatchEvent(new CustomEvent('ge:ai-models-status')); } catch {}
     } catch (e) {
+      if (listeners.signal.aborted || !root.isConnected) return;
       // Fetch failed — still give the user the affordance to set up
       // a model. Otherwise the dropdown shows only "Auto" with no
       // hint about what to do next.
@@ -370,22 +420,6 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       if (aiInpaintSelect) aiInpaintSelect.innerHTML = fallback;
       if (aiCommandSelect) aiCommandSelect.innerHTML = fallback;
       document.querySelectorAll('select.ge-tool-model').forEach(ts => { ts.innerHTML = fallback; });
-      const wireServe = (sel) => {
-        if (!sel) return;
-        let prev = sel.value;
-        sel.addEventListener('change', () => {
-          if (sel.value === '__serve_cookbook__') {
-            sel.value = prev;
-            openCookbookForImg2img();
-            return;
-          }
-          prev = sel.value;
-        });
-      };
-      wireServe(aiGenSelect);
-      wireServe(aiInpaintSelect);
-      wireServe(aiCommandSelect);
-      document.querySelectorAll('select.ge-tool-model').forEach(wireServe);
       void populateAgentSelect();
       updateFooterEditModel();
       _aiModelsStatus = { ready: false, models: [], error: String(e?.message || e), at: Date.now() };
@@ -393,15 +427,11 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
     }
   }
   loadAIModels();
-  const onModelEndpointsUpdated = (e) => {
-    if (!container.isConnected) {
-      window.removeEventListener('ge:model-endpoints-updated', onModelEndpointsUpdated);
-      return;
-    }
-    loadAIModels({ selectBaseUrl: e.detail?.baseUrl || '' });
+  if (aiCommandSelect) aiCommandSelect._refreshAIModels = baseUrl => {
+    if (listeners.signal.aborted || !root.isConnected) return;
+    void loadAIModels({ selectBaseUrl: baseUrl });
     void populateAgentSelect();
   };
-  window.addEventListener('ge:model-endpoints-updated', onModelEndpointsUpdated);
   // Re-fetch the model list when the user opens the inpaint dropdown,
   // so a model served via Cookbook mid-edit shows up without having to
   // close and reopen the editor. Debounced to one refresh per 3s so
@@ -420,5 +450,5 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
       if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
     });
   };
-  container.addEventListener('mousedown', refreshOnOpen, true);
+  listen(root, 'mousedown', refreshOnOpen, true);
 }

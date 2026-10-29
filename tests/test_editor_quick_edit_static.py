@@ -352,7 +352,8 @@ def test_footer_shows_active_edit_model():
     assert "el.textContent = `Edit: ${label}`;" in models
     # Wired both after load and on inpaint-select change.
     assert "updateFooterEditModel();" in models
-    assert "aiInpaintSelect.addEventListener('change', () => updateFooterEditModel());" in models
+    assert "listen(aiInpaintSelect, 'change', () => updateFooterEditModel());" in models
+    assert "signal: listeners.signal" in models
 
 
 def test_quick_edit_has_a_model_picker():
