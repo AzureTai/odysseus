@@ -25,7 +25,7 @@ from src.auth_helpers import effective_user, is_delegated_credential
 from src.owner_identity import auth_disabled, is_request_sentinel_owner
 from src.attachment_refs import attachment_refs_from_metadata
 from src.constants import GENERATED_IMAGES_DIR
-from src.path_confinement import is_inside
+from src.path_confinement import PathEscape, canonical_root, confine, is_inside
 from src.upload_handler import (
     UploadCleanupSafetyError,
     count_recent_uploads,
@@ -154,31 +154,47 @@ def setup_upload_routes(upload_handler):
 
     def _upload_root() -> str:
         from src.constants import UPLOAD_DIR
-        return os.path.realpath(getattr(upload_handler, "upload_dir", UPLOAD_DIR))
+        return canonical_root(getattr(upload_handler, "upload_dir", UPLOAD_DIR))
 
     def _path_inside_upload_dir(path: str) -> bool:
         return is_inside(_upload_root(), path)
 
     def _resolve_upload_path(file_id: str) -> str:
-        from src.constants import UPLOAD_DIR
-        upload_root = os.path.normpath(getattr(upload_handler, "upload_dir", UPLOAD_DIR))
         safe_id = secure_filename(os.path.basename(file_id))
-        direct = os.path.normpath(os.path.join(upload_root, safe_id))
-        if not direct.startswith(upload_root + os.sep) or not _path_inside_upload_dir(direct):
-            raise HTTPException(403, "Access denied")
+        if not safe_id:
+            raise HTTPException(400, "Invalid file ID")
+        root = _upload_root()
+
+        direct = os.path.normpath(os.path.join(root, safe_id))
         if os.path.lexists(direct):
-            if os.path.isfile(direct):
-                return direct
+            try:
+                canonical_direct = confine(root, direct, allow_root=False)
+            except (PathEscape, ValueError):
+                raise HTTPException(403, "Access denied")
+            if os.path.isfile(canonical_direct):
+                return canonical_direct
             raise HTTPException(404, "File not found")
 
-        for root, _dirs, files in os.walk(upload_root, followlinks=False):
+        info = _load_upload_info(safe_id)
+        stored_path = (info or {}).get("path")
+        if stored_path:
+            try:
+                canonical_stored = confine(root, stored_path, allow_root=False)
+                if os.path.isfile(canonical_stored):
+                    return canonical_stored
+            except (PathEscape, ValueError):
+                raise HTTPException(403, "Access denied")
+
+        for walk_root, _dirs, files in os.walk(root, followlinks=False):
             if safe_id not in files:
                 continue
-            path = os.path.normpath(os.path.join(root, safe_id))
-            if not path.startswith(upload_root + os.sep) or not _path_inside_upload_dir(path):
+            cand = os.path.normpath(os.path.join(walk_root, safe_id))
+            try:
+                canonical_cand = confine(root, cand, allow_root=False)
+            except (PathEscape, ValueError):
                 raise HTTPException(403, "Access denied")
-            if os.path.isfile(path):
-                return path
+            if os.path.isfile(canonical_cand):
+                return canonical_cand
             raise HTTPException(404, "File not found")
 
         raise HTTPException(404, "File not found")
@@ -457,8 +473,12 @@ def setup_upload_routes(upload_handler):
             original_name = info.get("name", safe_file_id)
         file_owner = info.get("owner") if info else None
         _verify_upload_access(request, file_owner)
-        upload_root = os.path.normpath(_upload_root())
-        path = os.path.normpath(_resolve_upload_path(safe_file_id))
+        upload_root = _upload_root()
+        path = _resolve_upload_path(safe_file_id)
+        try:
+            path = confine(upload_root, path, allow_root=False)
+        except (PathEscape, ValueError):
+            raise HTTPException(403, "Access denied")
         if not path.startswith(upload_root + os.sep) or not _path_inside_upload_dir(path):
             raise HTTPException(403, "Access denied")
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or "application/octet-stream"
@@ -468,6 +488,10 @@ def setup_upload_routes(upload_handler):
         if thumb and mime.startswith("image/"):
             thumb_dir = os.path.normpath(os.path.join(upload_root, ".thumbs"))
             thumb_path = os.path.normpath(os.path.join(thumb_dir, safe_file_id + ".jpg"))
+            try:
+                thumb_path = confine(upload_root, thumb_path, allow_root=False)
+            except (PathEscape, ValueError):
+                raise HTTPException(403, "Access denied")
             if not thumb_path.startswith(thumb_dir + os.sep) or not _path_inside_upload_dir(thumb_path):
                 raise HTTPException(403, "Access denied")
             if request.method == "HEAD":
@@ -517,9 +541,10 @@ def setup_upload_routes(upload_handler):
         return next((fi for fi in db.values() if fi.get("id") == file_id), None)
 
     def _vision_cache_path(file_id: str) -> str:
-        cache_dir = os.path.join(_upload_root(), ".vision")
+        safe_id = secure_filename(os.path.basename(file_id))
+        cache_dir = os.path.normpath(os.path.join(_upload_root(), ".vision"))
         os.makedirs(cache_dir, exist_ok=True)
-        return os.path.join(cache_dir, file_id + ".txt")
+        return os.path.normpath(os.path.join(cache_dir, safe_id + ".txt"))
 
     def _sync_gallery_caption_for_upload(info: dict | None, owner: str | None, text: str) -> None:
         """Copy upload OCR/vision text onto the promoted gallery image row."""
