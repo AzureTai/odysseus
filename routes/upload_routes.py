@@ -30,6 +30,7 @@ from src.upload_handler import (
     UploadCleanupSafetyError,
     count_recent_uploads,
     extract_upload_ids,
+    secure_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -454,16 +455,19 @@ def setup_upload_routes(upload_handler):
             original_name = info.get("name", file_id)
         file_owner = info.get("owner") if info else None
         _verify_upload_access(request, file_owner)
-        path = _resolve_upload_path(file_id)
+        path = os.path.normpath(_resolve_upload_path(file_id))
+        upload_root = os.path.normpath(_upload_root())
+        if not (path == upload_root or path.startswith(upload_root + os.sep)) or not _path_inside_upload_dir(path):
+            raise HTTPException(403, "Access denied")
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or "application/octet-stream"
         from fastapi.responses import FileResponse
         # Downscaled thumbnail for image previews — generated once and cached.
         # Skip generation during HEAD probe to avoid loading/processing whole image.
         if thumb and mime.startswith("image/"):
-            thumb_dir = os.path.join(_upload_root(), ".thumbs")
-            safe_file_id = os.path.basename(file_id)
-            thumb_path = os.path.join(thumb_dir, safe_file_id + ".jpg")
-            if not _path_inside_upload_dir(thumb_path) or not is_inside(thumb_dir, thumb_path):
+            thumb_dir = os.path.normpath(os.path.join(upload_root, ".thumbs"))
+            safe_file_id = secure_filename(os.path.basename(file_id))
+            thumb_path = os.path.normpath(os.path.join(thumb_dir, safe_file_id + ".jpg"))
+            if not (thumb_path.startswith(thumb_dir + os.sep) and _path_inside_upload_dir(thumb_path)):
                 raise HTTPException(403, "Access denied")
             if request.method == "HEAD":
                 if (os.path.isfile(thumb_path)
