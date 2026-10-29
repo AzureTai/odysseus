@@ -161,20 +161,21 @@ def setup_upload_routes(upload_handler):
 
     def _resolve_upload_path(file_id: str) -> str:
         from src.constants import UPLOAD_DIR
-        upload_root = getattr(upload_handler, "upload_dir", UPLOAD_DIR)
-        direct = os.path.join(upload_root, file_id)
+        upload_root = os.path.normpath(getattr(upload_handler, "upload_dir", UPLOAD_DIR))
+        safe_id = secure_filename(os.path.basename(file_id))
+        direct = os.path.normpath(os.path.join(upload_root, safe_id))
+        if not direct.startswith(upload_root + os.sep) or not _path_inside_upload_dir(direct):
+            raise HTTPException(403, "Access denied")
         if os.path.lexists(direct):
-            if not _path_inside_upload_dir(direct):
-                raise HTTPException(403, "Access denied")
             if os.path.isfile(direct):
                 return direct
             raise HTTPException(404, "File not found")
 
         for root, _dirs, files in os.walk(upload_root, followlinks=False):
-            if file_id not in files:
+            if safe_id not in files:
                 continue
-            path = os.path.join(root, file_id)
-            if not _path_inside_upload_dir(path):
+            path = os.path.normpath(os.path.join(root, safe_id))
+            if not path.startswith(upload_root + os.sep) or not _path_inside_upload_dir(path):
                 raise HTTPException(403, "Access denied")
             if os.path.isfile(path):
                 return path
@@ -443,21 +444,22 @@ def setup_upload_routes(upload_handler):
         so the client isn't downloading the full-resolution photo just to show it tiny."""
         if not upload_handler.validate_upload_id(file_id):
             raise HTTPException(400, "Invalid file ID")
+        safe_file_id = secure_filename(os.path.basename(file_id))
         import mimetypes as _mt
         # Look up original filename and owner from uploads.json
-        original_name = file_id
+        original_name = safe_file_id
         # _load_upload_index() tolerates a missing/corrupt uploads.json (it falls
         # back to the .bak sibling, then to {}), so a truncated DB degrades to
         # "no metadata" instead of a 500 from an unhandled JSONDecodeError.
         db = upload_handler._load_upload_index()
-        info = next((fi for fi in db.values() if fi.get("id") == file_id), None)
+        info = next((fi for fi in db.values() if fi.get("id") == safe_file_id), None)
         if info:
-            original_name = info.get("name", file_id)
+            original_name = info.get("name", safe_file_id)
         file_owner = info.get("owner") if info else None
         _verify_upload_access(request, file_owner)
-        path = os.path.normpath(_resolve_upload_path(file_id))
         upload_root = os.path.normpath(_upload_root())
-        if not (path == upload_root or path.startswith(upload_root + os.sep)) or not _path_inside_upload_dir(path):
+        path = os.path.normpath(_resolve_upload_path(safe_file_id))
+        if not path.startswith(upload_root + os.sep) or not _path_inside_upload_dir(path):
             raise HTTPException(403, "Access denied")
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or "application/octet-stream"
         from fastapi.responses import FileResponse
@@ -465,9 +467,8 @@ def setup_upload_routes(upload_handler):
         # Skip generation during HEAD probe to avoid loading/processing whole image.
         if thumb and mime.startswith("image/"):
             thumb_dir = os.path.normpath(os.path.join(upload_root, ".thumbs"))
-            safe_file_id = secure_filename(os.path.basename(file_id))
             thumb_path = os.path.normpath(os.path.join(thumb_dir, safe_file_id + ".jpg"))
-            if not (thumb_path.startswith(thumb_dir + os.sep) and _path_inside_upload_dir(thumb_path)):
+            if not thumb_path.startswith(thumb_dir + os.sep) or not _path_inside_upload_dir(thumb_path):
                 raise HTTPException(403, "Access denied")
             if request.method == "HEAD":
                 if (os.path.isfile(thumb_path)
