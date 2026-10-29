@@ -461,7 +461,10 @@ def setup_upload_routes(upload_handler):
         # Skip generation during HEAD probe to avoid loading/processing whole image.
         if thumb and mime.startswith("image/"):
             thumb_dir = os.path.join(_upload_root(), ".thumbs")
-            thumb_path = os.path.join(thumb_dir, file_id + ".jpg")
+            safe_file_id = os.path.basename(file_id)
+            thumb_path = os.path.join(thumb_dir, safe_file_id + ".jpg")
+            if not _path_inside_upload_dir(thumb_path) or not is_inside(thumb_dir, thumb_path):
+                raise HTTPException(403, "Access denied")
             if request.method == "HEAD":
                 if (os.path.isfile(thumb_path)
                         and os.path.getmtime(thumb_path) >= os.path.getmtime(path)):
