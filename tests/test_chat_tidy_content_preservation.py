@@ -128,7 +128,7 @@ def test_tidy_keeps_folder_assignment_working(tidy_api, monkeypatch, entrypoint)
         manager.sessions[sid] = SimpleNamespace(id=sid, name="New chat", archived=False,
                                                 updated_at=old.isoformat(), created_at=old.isoformat())
     monkeypatch.setattr(manager, "get_sessions_for_user", lambda owner: manager.sessions)
-    monkeypatch.setattr(endpoints, "resolve_task_endpoint", lambda **kwargs: ("http://model.invalid", "test", {}))
+    monkeypatch.setattr(endpoints, "resolve_task_endpoint", lambda *args, **kwargs: ("http://model.invalid", "test", {}))
     response_text = '{"folders":{"Projects":["chat-one","chat-two"]}}'
     monkeypatch.setattr(llm, "llm_call", lambda *args, **kwargs: response_text)
 
