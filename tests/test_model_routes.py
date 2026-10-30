@@ -1107,6 +1107,47 @@ def test_get_api_models_marks_picker_as_pinned_only(monkeypatch):
     assert by_id["anthropic/claude-sonnet-4"]["is_pinned"] is False
 
 
+def test_get_fresh_api_models_marks_cached_inventory_as_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+
+    result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
+
+    assert [row["id"] for row in result] == [
+        "openai/gpt-image-1",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert all(row["picker_requires_pinning"] is True for row in result)
+    assert all(row["is_pinned"] is True for row in result)
+
+
+def test_get_legacy_api_models_preserves_hidden_selection_as_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["m1", "m2", "m3"]),
+        hidden_models=json.dumps(["m2"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+
+    result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
+
+    by_id = {row["id"]: row for row in result}
+    assert by_id["m1"]["is_pinned"] is True
+    assert by_id["m2"]["is_pinned"] is False
+    assert by_id["m3"]["is_pinned"] is True
+
+
 def test_reprobe_preserves_pinned_models(monkeypatch):
     ep = _make_endpoint(pinned_models=json.dumps(["deploy-1"]))
     db = _PinnedFakeDb([ep])
@@ -1240,6 +1281,7 @@ def _patch_create_deps(monkeypatch, db, settings=None):
     monkeypatch.setattr(model_routes, "_save_settings", lambda s: settings.update(s))
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u)
     monkeypatch.setattr(auth_helpers, "get_current_user", lambda req: None)
+    monkeypatch.setattr(model_routes, "check_outbound_url", lambda *a, **k: (True, "ok"))
     return settings
 
 
@@ -1266,7 +1308,7 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
     assert result[1]["api_key_fingerprint"] == ""
 
 
-def test_list_api_endpoint_reports_inventory_count_when_none_pinned(monkeypatch):
+def test_list_api_endpoint_defaults_inventory_to_visible_when_none_pinned(monkeypatch):
     ep = _make_endpoint(
         base_url="https://api.example.test/v1",
         cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
@@ -1279,10 +1321,29 @@ def test_list_api_endpoint_reports_inventory_count_when_none_pinned(monkeypatch)
 
     result = endpoint(_PinnedFakeRequest())
 
-    assert result[0]["models"] == []
+    assert result[0]["models"] == [
+        "openai/gpt-image-1",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert result[0]["pinned_models"] == result[0]["models"]
     assert result[0]["model_count"] == 2
     assert result[0]["picker_requires_pinning"] is True
     assert result[0]["status"] == "online"
+
+
+def test_api_picker_preserves_explicit_empty_selection():
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=json.dumps([]),
+    )
+
+    models, pinned = model_routes._picker_models_for_endpoint(
+        ep, ep.base_url, ep.endpoint_kind
+    )
+
+    assert models == []
+    assert pinned == []
 
 
 def test_list_api_endpoint_returns_pinned_picker_models(monkeypatch):
@@ -1767,7 +1828,7 @@ def test_api_models_openrouter_uses_pinned_models_not_hidden(monkeypatch):
     assert result["items"][0]["models"] == ["openai/gpt-image-1"]
 
 
-def test_api_models_openrouter_derives_legacy_visible_models(monkeypatch):
+def test_api_models_openrouter_defaults_cached_models_visible(monkeypatch):
     row = _route_ep(
         "openrouter",
         "https://openrouter.ai/api/v1",
@@ -1775,7 +1836,6 @@ def test_api_models_openrouter_derives_legacy_visible_models(monkeypatch):
         pinned_models=None,
         api_key="fake-key",
     )
-    row.hidden_models = json.dumps(["m2"])
     db = _RouteDb([row])
     router = model_routes.setup_model_routes(model_discovery=None)
 
@@ -1788,7 +1848,7 @@ def test_api_models_openrouter_derives_legacy_visible_models(monkeypatch):
     result = _route_endpoint(router, "/api/models")(_route_request())
 
     assert result["items"][0]["endpoint_name"] == "openrouter"
-    assert result["items"][0]["models"] == ["m1", "m3"]
+    assert result["items"][0]["models"] == ["m1", "m2", "m3"]
 
 
 @pytest.mark.asyncio
@@ -1851,6 +1911,24 @@ def test_background_refresh_deduplicates_same_base_url(monkeypatch):
     assert calls == ["http://127.0.0.1:8000/v1"]
     assert json.loads(ep1.cached_models) == ["live-model"]
     assert json.loads(ep2.cached_models) == ["live-model"]
+
+
+def test_picker_refresh_waits_for_discovered_models(monkeypatch):
+    ep = _route_ep("local", "http://127.0.0.1:8000/v1", endpoint_kind="local")
+    db = _RouteDb([ep])
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: ["new-model"])
+
+    result = _route_endpoint(router, "/api/models")(
+        _route_request(), refresh=True, wait_refresh=True
+    )
+
+    assert result["items"][0]["models"] == ["new-model"]
 
 
 def test_background_refresh_failure_keeps_existing_cached_models(monkeypatch):
@@ -1923,6 +2001,7 @@ def test_explicit_proxy_test_fetches_models_with_long_timeout(monkeypatch):
 
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "_ping_endpoint", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")))
+    monkeypatch.setattr(model_routes, "check_outbound_url", lambda *a, **k: (True, "ok"))
 
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]
@@ -1961,6 +2040,7 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
     monkeypatch.setattr(model_routes, "_save_settings", lambda settings: None)
     monkeypatch.setattr("src.auth_helpers.get_current_user", lambda request: None)
     monkeypatch.setattr(model_routes, "_ping_endpoint", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")))
+    monkeypatch.setattr(model_routes, "check_outbound_url", lambda *a, **k: (True, "ok"))
 
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]

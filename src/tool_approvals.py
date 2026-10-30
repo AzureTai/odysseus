@@ -1,8 +1,9 @@
-"""Opaque, exact, one-use approvals for tainted model-requested actions.
+"""Opaque exact-action approvals with explicit task and chat scopes.
 
-The model may propose an action after untrusted context, but only the server
-stores and later executes the exact approved tool input.  Browser-visible
-fields are display copies, never authority.
+The server still seals and claims the first displayed action exactly once. The
+selected scope then bypasses only the automatic post-external-context approval
+gate for the rest of the resumed task or chat session. Browser-visible fields
+are display copies, never authority.
 """
 
 from __future__ import annotations
@@ -14,9 +15,24 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
+from src.tool_approval_scopes import (
+    CHAT_SESSION_APPROVAL_DECISION,
+    DENY_APPROVAL_DECISION,
+    TASK_APPROVAL_DECISION,
+    ToolApprovalScope,
+    scope_for_decision,
+)
 from src.tool_capabilities import ToolCapabilities, capabilities_for_action
+from src.agent_runtime.authority import RequestAuthority
+
+if TYPE_CHECKING:
+    from src.agent_runtime.resource_binding import BoundFilesystemOperation
+    from src.agent_runtime.remote_resources import BoundBackendOperation
+    from src.agent_runtime.owned_resources import BoundOwnedOperation
+    from src.agent_runtime.process_resources import BoundProcessOperation
+    from src.browser_identity import BoundBrowserOperation
 
 
 DEFAULT_APPROVAL_TTL_SECONDS = 10 * 60
@@ -31,6 +47,51 @@ def _normalized_workspace(workspace: Any) -> str:
     if not isinstance(workspace, str) or not workspace.strip():
         return ""
     return os.path.realpath(os.path.expanduser(workspace))
+
+
+_MAX_APPROVAL_SELECTED_TOOLS = 512
+_MAX_APPROVAL_TOOL_NAME_CHARS = 512
+_MAX_APPROVAL_CONTINUATION_QUERY_CHARS = 4000
+
+
+def _normalized_selected_tools(
+    selected_tools: Any,
+    *,
+    required_tool: Any = None,
+) -> tuple[str, ...]:
+    if isinstance(selected_tools, str):
+        selected_tools = (selected_tools,)
+    try:
+        values = selected_tools or ()
+        names = {
+            name.strip()
+            for name in values
+            if (
+                isinstance(name, str)
+                and name.strip()
+                and len(name.strip()) <= _MAX_APPROVAL_TOOL_NAME_CHARS
+            )
+        }
+        required_name = str(required_tool or "").strip()
+        if required_name and len(required_name) <= _MAX_APPROVAL_TOOL_NAME_CHARS:
+            names.add(required_name)
+        ordered = sorted(names)
+        if len(ordered) <= _MAX_APPROVAL_SELECTED_TOOLS:
+            return tuple(ordered)
+        kept = ordered[:_MAX_APPROVAL_SELECTED_TOOLS]
+        if required_name and required_name in names and required_name not in kept:
+            kept[-1] = required_name
+            kept.sort()
+        return tuple(kept)
+    except TypeError:
+        return ()
+
+
+def _normalized_continuation_query(value: Any) -> str:
+    # The query is server-derived from the interrupted run and already lives in
+    # session history. Keep the pending copy bounded because approvals are held
+    # in memory until consumed or expired.
+    return str(value or "").strip()[:_MAX_APPROVAL_CONTINUATION_QUERY_CHARS]
 
 
 def _canonical_digest(payload: dict[str, Any]) -> str:
@@ -60,8 +121,16 @@ def _binding_payload(
     document_version: Any,
     document_digest: Any,
     external_untrusted_context_seen: bool,
+    selected_tools: Any,
+    continuation_query: Any,
     effects: tuple[str, ...],
     result_integrity: str,
+    request_authority: RequestAuthority | None = None,
+    resource_operation=None,
+    backend_operation=None,
+    owned_operation=None,
+    process_operation=None,
+    browser_operation=None,
 ) -> dict[str, Any]:
     return {
         "owner": _normalized_owner(owner),
@@ -76,8 +145,18 @@ def _binding_payload(
         ),
         "document_digest": str(document_digest or "").strip().lower(),
         "external_untrusted_context_seen": bool(external_untrusted_context_seen),
+        "selected_tools": list(
+            _normalized_selected_tools(selected_tools, required_tool=tool_name)
+        ),
+        "continuation_query": _normalized_continuation_query(continuation_query),
         "effects": list(effects),
         "result_integrity": str(result_integrity),
+        "request_authority": request_authority.to_dict() if request_authority is not None else None,
+        "resource_operation": resource_operation.to_dict() if resource_operation is not None else None,
+        "backend_operation": backend_operation.to_dict() if backend_operation is not None else None,
+        "owned_operation": owned_operation.to_dict() if owned_operation is not None else None,
+        "process_operation": process_operation.to_dict() if process_operation is not None else None,
+        "browser_operation": browser_operation.to_dict() if browser_operation is not None else None,
     }
 
 
@@ -99,26 +178,57 @@ class PendingToolApproval:
     digest: str
     created_at: float
     expires_at: float
+    # Server-only continuation state. Both fields are digest-bound and never
+    # exposed in the browser payload.
+    selected_tools: tuple[str, ...] = ()
+    continuation_query: str = ""
+    # The originating user request is internal continuation context only; it
+    # is never displayed or treated as authorization for the sealed action.
+    request_text: str = ""
+    request_authority: RequestAuthority | None = None
+    # Server-resolved targets at proposal time; never read from the approval UI.
+    resource_operation: BoundFilesystemOperation | None = None
+    backend_operation: BoundBackendOperation | None = None
+    owned_operation: BoundOwnedOperation | None = None
+    process_operation: BoundProcessOperation | None = None
+    browser_operation: BoundBrowserOperation | None = None
 
     def public_payload(self, *, reason: str | None = None) -> dict[str, Any]:
         return {
             "kind": "tool_approval",
             "approval_id": self.approval_id,
-            "question": "Allow this exact action once?",
+            # The browser already owns this chat id. Persisting it with the
+            # resolved card lets history-derived session grants remain bound to
+            # this exact chat and prevents inheritance by a forked session.
+            "session_id": self.session_id,
+            "question": "Allow this task to continue?",
             "description": reason or (
-                "Untrusted context influenced this run, so this action needs "
-                "your explicit approval."
+                "Untrusted context influenced this run, so continuing with "
+                "otherwise-gated actions needs your explicit approval."
             ),
             "options": [
                 {
-                    "label": "Allow once",
-                    "value": "approve",
-                    "description": "Execute only the sealed action shown here.",
+                    "label": "Allow for this task",
+                    "value": TASK_APPROVAL_DECISION,
+                    "description": (
+                        "Execute the sealed action and allow every otherwise-gated "
+                        "action needed to finish this request. Current tool, account, "
+                        "workspace, and sandbox restrictions still apply."
+                    ),
+                },
+                {
+                    "label": "Allow for this chat session",
+                    "value": CHAT_SESSION_APPROVAL_DECISION,
+                    "description": (
+                        "Execute the sealed action and stop asking at this gate for "
+                        "later requests in this chat. Current tool, account, workspace, "
+                        "and sandbox restrictions still apply."
+                    ),
                 },
                 {
                     "label": "Deny",
-                    "value": "deny",
-                    "description": "Do not execute it.",
+                    "value": DENY_APPROVAL_DECISION,
+                    "description": "Do not execute the proposed action.",
                 },
             ],
             "action": {
@@ -137,11 +247,22 @@ class PendingToolApproval:
 
 @dataclass
 class ExactToolApproval:
-    """A consumed grant that the dispatcher can claim exactly once."""
+    """A consumed exact first action plus an explicit continuation scope."""
 
     pending: PendingToolApproval
+    scope: ToolApprovalScope = ToolApprovalScope.TASK
+    # The seam consumed by agent_loop. Both chat-card allow choices cover the
+    # complete resumed task, because one-action scope there immediately
+    # re-entered the same gate on the next round. Callers with no resumable
+    # chat still get SINGLE_ACTION, which leaves the gate armed behind the
+    # sealed action.
+    allow_remaining_actions: bool = True
     _claimed: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    @property
+    def grants_chat_session(self) -> bool:
+        return self.scope is ToolApprovalScope.CHAT_SESSION
 
     def _matches_unlocked(
         self,
@@ -175,8 +296,16 @@ class ExactToolApproval:
             external_untrusted_context_seen=(
                 self.pending.external_untrusted_context_seen
             ),
+            selected_tools=self.pending.selected_tools,
+            continuation_query=self.pending.continuation_query,
             effects=effects,
             result_integrity=result_integrity,
+            request_authority=self.pending.request_authority,
+            resource_operation=self.pending.resource_operation,
+            backend_operation=self.pending.backend_operation,
+            owned_operation=self.pending.owned_operation,
+            process_operation=self.pending.process_operation,
+            browser_operation=self.pending.browser_operation,
         )
         return _canonical_digest(expected) == self.pending.digest
 
@@ -255,10 +384,92 @@ class ToolApprovalStore:
         document_id: Any = None,
         document_version: Any = None,
         document_digest: Any = None,
+        selected_tools: Any = None,
+        continuation_query: Any = None,
         external_untrusted_context_seen: bool,
         capabilities: ToolCapabilities,
+        request_text: Any = "",
+        request_authority: RequestAuthority | None = None,
+        client_runtime_context: dict | None = None,
     ) -> PendingToolApproval:
+        if request_authority is not None and not isinstance(request_authority, RequestAuthority):
+            raise TypeError("Approval authority must be server-owned RequestAuthority")
         now = time.time()
+        from src.agent_runtime.authority import ExactOperation
+        from src.agent_runtime.resource_binding import NATIVE_FILESYSTEM_TOOLS, resolve_filesystem_operation
+        from src.agent_runtime.resources import FilesystemRoot
+        resource_operation = None
+        backend_operation = None
+        owned_operation = None
+        process_operation = None
+        browser_operation = None
+        from src.agent_runtime.remote_resources import BoundBackendOperation, resolve_backend
+        from src.agent_runtime.owned_resources import needs_owned_binding, resolve_owned_operation
+        from src.agent_runtime.resources import NativeBackendResource
+        try:
+            operation = ExactOperation.normalize(tool_name, content)
+            backend = resolve_backend(operation.transport_tool, context=client_runtime_context, content=operation.input, owner=_normalized_owner(owner))
+            if request_authority is not None and request_authority.inherited:
+                if not request_authority.permits(operation) or backend not in request_authority.backend_resources:
+                    raise ValueError("Child approval exceeds originating authority")
+            backend_operation = BoundBackendOperation(backend,
+                request_authority.request_id if request_authority is not None else "",
+                _normalized_owner(owner), str(session_id or ""), operation.transport_tool, operation.input)
+            from src.agent_runtime.process_resources import (
+                LAUNCH_TOOLS, needs_process_binding, resolve_process_operation, seal_launch_scope)
+            if request_authority is not None and needs_process_binding(operation, backend):
+                process_authority = request_authority
+                if (not request_authority.inherited and operation.tool in LAUNCH_TOOLS
+                        and not any(s.backend == backend for s in request_authority.launch_scopes)):
+                    # Launch scopes exist only for granted bash/python, but the
+                    # approval exists to admit an ungranted one. Seal its launch
+                    # boundary now, in the request's workspace, the same way an
+                    # ungranted filesystem action gets its root below (#6635).
+                    # With no workspace bound, bash/python run in the agent
+                    # workspace (agent_cwd), so the launch is sealed there.
+                    roots = request_authority.resource_roots
+                    if not roots:
+                        from src.tool_execution import default_agent_workspace
+                        roots = (FilesystemRoot.seal(workspace or default_agent_workspace(),
+                                                     owner=_normalized_owner(owner)),)
+                    if len(roots) == 1:
+                        from dataclasses import replace
+                        process_authority = replace(
+                            request_authority, launch_scopes=(seal_launch_scope(backend, roots[0]),))
+                process_operation = resolve_process_operation(process_authority, operation, backend)
+            from src.browser_identity import native_browser, resolve_browser_operation
+            if native_browser(operation, backend):
+                if request_authority is None:
+                    raise ValueError("Browser approval requires originating resource authority")
+                browser_operation = resolve_browser_operation(request_authority, operation)
+            if isinstance(backend, NativeBackendResource) and needs_owned_binding(operation):
+                resolved_owned = resolve_owned_operation(operation, owner=_normalized_owner(owner),
+                    thread_id=str(session_id or ""), request_id=backend_operation.request_id,
+                    document_id=document_id)
+                if request_authority is not None and request_authority.inherited:
+                    if not all(any(scope.permits(r) for scope in request_authority.owned_scopes) for r in resolved_owned.resources):
+                        raise ValueError("Child approval exceeds originating record scope")
+                owned_operation = resolved_owned
+                if owned_operation.document_id:
+                    document_id = owned_operation.document_id
+                    document_version = owned_operation.document_version
+                    document_digest = owned_operation.document_digest
+        except (ValueError, TypeError, OSError, RuntimeError, AttributeError):
+            pass  # Unresolved proposals are never reconstructed at execution.
+        if tool_name in NATIVE_FILESYSTEM_TOOLS and backend_operation is not None and isinstance(backend_operation.resource, NativeBackendResource):
+            try:
+                roots = request_authority.resource_roots if request_authority is not None else ()
+                if not roots and (request_authority is None or not request_authority.inherited):
+                    from src.tool_execution import default_agent_workspace
+                    roots = (FilesystemRoot.seal(workspace or default_agent_workspace(),
+                                                 owner=_normalized_owner(owner)),)
+                resource_operation = resolve_filesystem_operation(
+                    ExactOperation.normalize(tool_name, content), roots=roots, workspace=workspace or "",
+                    request_id=request_authority.request_id if request_authority is not None else "")
+            except (ValueError, TypeError, OSError, RuntimeError):
+                # An unresolved proposal may be displayed, but it cannot execute
+                # after approval by reconstructing its targets at claim time.
+                pass
         effects = tuple(sorted(effect.value for effect in capabilities.effects))
         result_integrity = capabilities.result_integrity.value
         payload = _binding_payload(
@@ -272,8 +483,16 @@ class ToolApprovalStore:
             document_version=document_version,
             document_digest=document_digest,
             external_untrusted_context_seen=external_untrusted_context_seen,
+            selected_tools=selected_tools,
+            continuation_query=continuation_query,
             effects=effects,
             result_integrity=result_integrity,
+            request_authority=request_authority,
+            resource_operation=resource_operation,
+            backend_operation=backend_operation,
+            owned_operation=owned_operation,
+            process_operation=process_operation,
+            browser_operation=browser_operation,
         )
         pending = PendingToolApproval(
             approval_id=secrets.token_urlsafe(32),
@@ -294,6 +513,15 @@ class ToolApprovalStore:
             digest=_canonical_digest(payload),
             created_at=now,
             expires_at=now + self._ttl_seconds,
+            selected_tools=tuple(payload["selected_tools"]),
+            continuation_query=payload["continuation_query"],
+            request_text=str(request_text or ""),
+            request_authority=request_authority,
+            resource_operation=resource_operation,
+            backend_operation=backend_operation,
+            owned_operation=owned_operation,
+            process_operation=process_operation,
+            browser_operation=browser_operation,
         )
         with self._lock:
             self._purge_expired_locked(now)
@@ -331,7 +559,17 @@ class ToolApprovalStore:
         decision: Any,
         owner: Any,
         session_id: Any,
+        allow_continuation: bool = True,
     ) -> ExactToolApproval | None:
+        """Consume a pending approval.
+
+        ``allow_continuation`` is the caller's assertion that it owns a
+        resumable conversation the granted scope can apply to. Callers without
+        one (the skill tester, unattended audits) pass ``False`` and get the
+        original one-use grant, so a button labelled "Allow once" cannot widen
+        into a run-long bypass just because the chat card reuses the same wire
+        value.
+        """
         now = time.time()
         with self._lock:
             self._purge_expired_locked(now)
@@ -348,9 +586,21 @@ class ToolApprovalStore:
                 # another owner's pending action.
                 return None
             self._pending.pop(approval_key, None)
-        if str(decision or "").strip().lower() != "approve":
+        normalized_decision = str(decision or "").strip().lower()
+        scope = scope_for_decision(normalized_decision)
+        if scope is None:
             return None
-        return ExactToolApproval(pending)
+        if not allow_continuation:
+            return ExactToolApproval(
+                pending,
+                scope=ToolApprovalScope.SINGLE_ACTION,
+                allow_remaining_actions=False,
+            )
+        return ExactToolApproval(
+            pending,
+            scope=scope,
+            allow_remaining_actions=True,
+        )
 
     def peek(self, approval_id: Any) -> PendingToolApproval | None:
         now = time.time()
