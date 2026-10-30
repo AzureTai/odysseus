@@ -30,35 +30,112 @@ async function openApp(page) {
   ).toBe(1);
 }
 
+function isMobileViewport(testInfo) {
+  const width = testInfo.project.use?.viewport?.width || 0;
+  return width > 0 && width <= 768;
+}
+
+/**
+ * Reach Settings through genuine UI controls on either desktop or mobile viewports.
+ * On mobile (<=768px), the rail is hidden and the sidebar must be opened via hamburger.
+ */
+async function openSettings(page, isMobile) {
+  let settingsButton;
+  if (isMobile) {
+    const hamburger = page.locator('#hamburger-btn:visible').first();
+    await expect(hamburger, 'Hamburger button must be visible on mobile').toBeVisible({ timeout: 5000 });
+    await hamburger.click();
+    const sidebar = page.locator('#sidebar:not(.hidden)');
+    await expect(sidebar, 'Sidebar must open upon hamburger tap').toBeVisible({ timeout: 5000 });
+    await page.waitForTimeout(300);
+    settingsButton = sidebar.locator('#user-bar-settings');
+  } else {
+    settingsButton = page.locator('#rail-settings:visible, #user-bar-settings:visible').first();
+  }
+
+  await expect(settingsButton, 'Settings button must be reachable and visible').toBeVisible({ timeout: 5000 });
+  await settingsButton.click();
+  const dialog = page.locator('#settings-modal');
+  await expect(dialog, 'Settings modal must become visible').toBeVisible({ timeout: 5000 });
+  return dialog;
+}
+
+/**
+ * Reach Notes through genuine UI controls on either desktop or mobile viewports.
+ */
+async function openNotes(page, isMobile) {
+  let notesButton;
+  if (isMobile) {
+    const hamburger = page.locator('#hamburger-btn:visible').first();
+    await expect(hamburger, 'Hamburger button must be visible on mobile').toBeVisible({ timeout: 5000 });
+    await hamburger.click();
+    const sidebar = page.locator('#sidebar:not(.hidden)');
+    await expect(sidebar, 'Sidebar must open upon hamburger tap').toBeVisible({ timeout: 5000 });
+    await page.waitForTimeout(300);
+    notesButton = sidebar.locator('#tool-notes-btn');
+  } else {
+    notesButton = page.locator('#rail-notes:visible, #tool-notes-btn:visible').first();
+  }
+
+  await expect(notesButton, 'Notes button must be reachable and visible').toBeVisible({ timeout: 5000 });
+  await notesButton.click();
+  const realNotes = page.locator('.notes-pane').first();
+  await expect(realNotes, 'Notes pane must become visible').toBeVisible({ timeout: 5000 });
+  return realNotes;
+}
+
+/**
+ * Reach Document editor through genuine UI controls on either desktop or mobile viewports.
+ */
+async function openDocument(page, isMobile) {
+  let docButton;
+  if (isMobile) {
+    const hamburger = page.locator('#hamburger-btn:visible').first();
+    await expect(hamburger, 'Hamburger button must be visible on mobile').toBeVisible({ timeout: 5000 });
+    await hamburger.click();
+    const sidebar = page.locator('#sidebar:not(.hidden)');
+    await expect(sidebar, 'Sidebar must open upon hamburger tap').toBeVisible({ timeout: 5000 });
+    await page.waitForTimeout(300);
+    docButton = sidebar.locator('#library-new-doc-btn');
+  } else {
+    docButton = page.locator('#library-new-doc-btn:visible').first();
+    if (!(await docButton.count())) {
+      const hamburger = page.locator('#hamburger-btn:visible').first();
+      if (await hamburger.count()) {
+        await hamburger.click();
+        await page.waitForTimeout(300);
+        docButton = page.locator('#sidebar:not(.hidden) #library-new-doc-btn');
+      }
+    }
+  }
+
+  await expect(docButton, 'Document creation button must be reachable and visible').toBeVisible({ timeout: 5000 });
+  await docButton.click();
+  const docPane = page.locator('.doc-editor-pane').first();
+  await expect(docPane, 'Document editor pane must become visible').toBeVisible({ timeout: 10000 });
+  return docPane;
+}
+
 test('renders actual Odysseus UI and captures review screenshots', async ({ page }, testInfo) => {
   await openApp(page);
   const out = testInfo.config.metadata.evidenceDir;
   fs.mkdirSync(out, { recursive: true });
   const name = testInfo.project.name;
+  const isMobile = isMobileViewport(testInfo);
+
+  // 1. Chat screenshot (default view)
   await page.screenshot({ path: path.join(out, `${name}-chat.png`), fullPage: false, animations: 'disabled' });
 
-  // Screenshot the actual Settings UI only if a real user-visible Settings
-  // control is reachable; never fabricate a modal for PR screenshots.
-  const settingsButton = page.locator('#rail-settings:visible, #user-bar-settings:visible').first();
-  if (await settingsButton.count()) {
-    await settingsButton.click();
-    const dialog = page.locator('#settings-modal');
-    if (await dialog.isVisible()) {
-      await page.screenshot({ path: path.join(out, `${name}-settings.png`), fullPage: false, animations: 'disabled' });
-    }
-  }
-
-  // Open the real Notes route via an existing UI action when it is reachable.
-  // These screenshots reflect genuine runtime content, not test-injected panes.
+  // 2. Settings screenshot via actual user-visible navigation
   await openApp(page);
-  const notesButton = page.locator('#rail-notes:visible, #tool-notes-btn:visible').first();
-  if (await notesButton.count()) {
-    await notesButton.click();
-    const realNotes = page.locator('.notes-pane:visible').first();
-    if (await realNotes.count()) {
-      await page.screenshot({ path: path.join(out, `${name}-notes.png`), fullPage: false, animations: 'disabled' });
-    }
-  }
+  await openSettings(page, isMobile);
+  await page.screenshot({ path: path.join(out, `${name}-settings.png`), fullPage: false, animations: 'disabled' });
+
+  // 3. Notes screenshot via actual user-visible navigation
+  await openApp(page);
+  await openNotes(page, isMobile);
+  await page.screenshot({ path: path.join(out, `${name}-notes.png`), fullPage: false, animations: 'disabled' });
+
   testInfo.annotations.push({ type: 'evidence', description: out });
 });
 
@@ -86,8 +163,8 @@ test('browser-owned window scrolling is not globally reset', async ({ page }) =>
   expect(value).toBeGreaterThan(100);
 });
 
-test('mobile Notes and Documents panes honor the safe-area top', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'phone-webkit-portrait', 'Only mobile <=768px');
+test('CSS cascade rules for mobile Notes and Documents respect safe areas', async ({ page }, testInfo) => {
+  test.skip(!isMobileViewport(testInfo), 'Only mobile viewports <=768px');
   await openApp(page);
   const results = await page.evaluate(() => {
     document.documentElement.style.setProperty('--safe-top', '44px');
@@ -100,7 +177,7 @@ test('mobile Notes and Documents panes honor the safe-area top', async ({ page }
     ]) {
       const pane = document.createElement('section');
       pane.className = paneClass;
-      pane.style.opacity = '0'; // CSS-only fixture, not a screenshot of fake app content
+      pane.style.opacity = '0'; // CSS cascade regression check
       document.body.appendChild(pane);
       document.body.classList.add(bodyClass);
       const style = window.getComputedStyle(pane);
@@ -120,8 +197,64 @@ test('mobile Notes and Documents panes honor the safe-area top', async ({ page }
   }
 });
 
+test('real Notes and Document panes honor safe-area geometry in the live application', async ({ page }, testInfo) => {
+  const isMobile = isMobileViewport(testInfo);
+  test.skip(!isMobile, 'Only mobile viewports <=768px');
+  await openApp(page);
+
+  // Configure simulated safe-area insets (e.g. iPhone notch / Dynamic Island)
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('--safe-top', '44px');
+    document.documentElement.style.setProperty('--sheet-top', '68px');
+    document.documentElement.style.setProperty('--app-height', '844px');
+  });
+
+  // 1. Verify actual Notes UI
+  const realNotes = await openNotes(page, isMobile);
+  const notesMetrics = await realNotes.evaluate(el => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      top: style.top,
+      height: style.height,
+      maxHeight: style.maxHeight,
+      rectTop: rect.top,
+      rectHeight: rect.height,
+    };
+  });
+
+  expect(notesMetrics.top, 'Real Notes pane top must match --sheet-top').toBe('68px');
+  expect(parseFloat(notesMetrics.height), 'Real Notes pane height must respect safe area').toBeGreaterThanOrEqual(770);
+  expect(notesMetrics.rectTop, 'Real Notes pane must not overlap the 44px safe-area top notch').toBeGreaterThanOrEqual(44);
+
+  // 2. Verify actual Document UI
+  await openApp(page);
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('--safe-top', '44px');
+    document.documentElement.style.setProperty('--sheet-top', '68px');
+    document.documentElement.style.setProperty('--app-height', '844px');
+  });
+
+  const realDoc = await openDocument(page, isMobile);
+  const docMetrics = await realDoc.evaluate(el => {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      top: style.top,
+      height: style.height,
+      maxHeight: style.maxHeight,
+      rectTop: rect.top,
+      rectHeight: rect.height,
+    };
+  });
+
+  expect(docMetrics.top, 'Real Document pane top must match --sheet-top').toBe('68px');
+  expect(parseFloat(docMetrics.height), 'Real Document pane height must respect safe area').toBeGreaterThanOrEqual(770);
+  expect(docMetrics.rectTop, 'Real Document pane must not overlap the 44px safe-area top notch').toBeGreaterThanOrEqual(44);
+});
+
 test('restored floating windows clamp away from a left safe area', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop-chromium', 'Geometry test uses desktop resizable windows');
+  test.skip(isMobileViewport(testInfo), 'Geometry test uses desktop resizable windows');
   await openApp(page);
   const value = await page.evaluate(async () => {
     document.documentElement.style.setProperty('--safe-left', '58px');
@@ -139,7 +272,6 @@ test('restored floating windows clamp away from a left safe area', async ({ page
       const padAtRestore = parseFloat(
         getComputedStyle(document.body).paddingLeft
       );
-      console.log('PADDING AT RESTORE:', padAtRestore);
 
       if (Math.abs(padAtRestore - 58) > 0.5) {
         throw new Error(
@@ -174,7 +306,7 @@ test('restored floating windows clamp away from a left safe area', async ({ page
       probe.remove();
     }
   });
-  console.log('WINDOW RESTORE DIAGNOSTIC:', JSON.stringify(value));
+
   expect(value.paddingLeft).toBeGreaterThanOrEqual(58);
   expect(value.width).toBe(480);
   expect(value.left).toBeGreaterThanOrEqual(value.paddingLeft);
