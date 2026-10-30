@@ -1025,10 +1025,10 @@ def test_python_server_readiness_requires_llama_cpp_server_module():
     # Termux fallback readiness check requires .server
     assert 'if ! python3 -c "import llama_cpp.server" 2>/dev/null; then' in routes_source
     # Build-failure fallback pip check requires .server
-    assert 'if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp.server" 2>/dev/null; then' in routes_source
+    assert 'if [ -z "$_odysseus_llama_bin" ] && ! python3 -c "import llama_cpp.server" 2>/dev/null; then' in routes_source
     # Shim reconciliation and post-install finalization require .server
-    assert 'if ! python3 -c "import llama_cpp.server" 2>/dev/null; then' in helpers_source
-    assert 'if ! command -v llama-server >/dev/null 2>&1 && python3 -c "import llama_cpp.server" 2>/dev/null; then' in helpers_source
+    assert 'elif python3 -c "import llama_cpp.server" 2>/dev/null; then' in helpers_source
+    assert 'if [ -z "$_odysseus_llama_bin" ] && python3 -c "import llama_cpp.server" 2>/dev/null; then' in helpers_source
 
     # GPU offload support checks still intentionally inspect base llama_cpp
     assert 'llama_cpp.llama_supports_gpu_offload()' in routes_source
@@ -1092,8 +1092,17 @@ async def test_generated_runner_preflight_retires_stale_shim_before_backend_sele
             break
     assert endpoint is not None
 
-    http_req = Request({"type": "http", "method": "POST", "path": "/api/model/serve", "headers": []})
+    from types import SimpleNamespace
+    http_req = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/model/serve",
+        "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(
+            is_configured=True, is_admin=lambda user: user == "admin"))),
+    })
     http_req.state.current_user = "admin"
+    http_req.state.local_model_authority = True
 
     req = ServeRequest(
         repo_id="test/repo",
@@ -1112,7 +1121,7 @@ async def test_generated_runner_preflight_retires_stale_shim_before_backend_sele
     # Reconciliation must appear strictly BEFORE the Termux/backend check
     recon_idx = runner_script.find("Native llama-server detected — retiring Odysseus compatibility shim in ~/bin")
     termux_idx = runner_script.find("if [ -d /data/data/com.termux ]; then")
-    backend_idx = runner_script.find("elif ! command -v llama-server &>/dev/null; then")
+    backend_idx = runner_script.find('elif [ -z "$_odysseus_llama_bin" ]; then')
     assert recon_idx != -1, "Reconciliation block missing from generated runner"
     assert termux_idx != -1, "Termux check missing from generated runner"
     assert backend_idx != -1, "Backend selection missing from generated runner"
@@ -1123,4 +1132,223 @@ async def test_generated_runner_preflight_retires_stale_shim_before_backend_sele
     assert res.returncode == 0
     assert not stale_shim.exists(), "Stale ~/bin/llama-server must have been retired by the generated preflight"
     assert "RUN_NATIVE: -m /dummy/model.gguf --port 8085" in res.stdout
+    assert "Native llama-server not found — building from source" not in res.stdout
+
+
+def test_broken_first_native_candidate_healthy_second_candidate_executes_healthy(tmp_path):
+    """Regression finding P2: When PATH contains an earlier broken candidate followed by a
+    healthy candidate, reconciliation and launch must select and execute the healthy candidate."""
+    from core.platform_compat import git_bash_path
+    broken_dir = tmp_path / "broken_bin"
+    _write_mock_native(broken_dir / "llama-server", succeeds=False)
+
+    healthy_dir = tmp_path / "healthy_bin"
+    _write_mock_native(healthy_dir / "llama-server", succeeds=True)
+
+    shim_file = tmp_path / "bin/llama-server"
+    _write_odysseus_shim(shim_file)
+
+    lines = [
+        f'export PATH="$HOME/bin:{git_bash_path(broken_dir)}:{git_bash_path(healthy_dir)}:/usr/bin:/bin"',
+    ]
+    _append_llama_server_shim_reconciliation_lines(lines)
+    lines.append('echo "RESOLVED=$_odysseus_llama_bin"')
+    lines.append('command -v llama-server')
+    lines.append('llama-server -m /dummy/model.gguf --port 8080')
+
+    res = _run_shell(tmp_path, lines)
+    assert res.returncode == 0
+    assert not shim_file.exists(), "Stale Odysseus shim must be retired"
+    assert f"RESOLVED={git_bash_path(healthy_dir / 'llama-server')}" in res.stdout
+    assert str(healthy_dir / "llama-server") in res.stdout
+    assert "RUN_NATIVE: -m /dummy/model.gguf --port 8080" in res.stdout
+    assert "error: missing libllama.so" not in res.stdout
+
+
+def test_paths_with_spaces_broken_first_healthy_second_launch(tmp_path):
+    """Regression: Paths containing spaces must be safely resolved, prioritized and launched."""
+    from core.platform_compat import git_bash_path
+    broken_dir = tmp_path / "broken path with spaces/bin"
+    _write_mock_native(broken_dir / "llama-server", succeeds=False)
+
+    healthy_dir = tmp_path / "healthy path with spaces/bin"
+    _write_mock_native(healthy_dir / "llama-server", succeeds=True)
+
+    shim_file = tmp_path / "bin/llama-server"
+    _write_odysseus_shim(shim_file)
+
+    model_dir = tmp_path / "models with spaces"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_file = model_dir / "my model.gguf"
+    model_file.write_text("dummy", encoding="utf-8")
+
+    lines = [
+        f'export PATH="$HOME/bin:{git_bash_path(broken_dir)}:{git_bash_path(healthy_dir)}:/usr/bin:/bin"',
+    ]
+    _append_llama_server_shim_reconciliation_lines(lines)
+    lines.append(f'llama-server -m "{git_bash_path(model_file)}" --port 8080')
+
+    res = _run_shell(tmp_path, lines)
+    assert res.returncode == 0
+    assert not shim_file.exists(), "Stale shim must be retired"
+    assert f"RUN_NATIVE: -m {git_bash_path(model_file)} --port 8080" in res.stdout
+    assert "error: missing libllama.so" not in res.stdout
+
+
+def test_command_hash_invalidation_switches_from_cached_broken_to_healthy(tmp_path):
+    """Regression: Command cache invalidation (`hash -r`) must prevent bash from reusing a
+    previously cached lookup to an earlier broken executable."""
+    from core.platform_compat import git_bash_path
+    broken_dir = tmp_path / "broken_bin"
+    _write_mock_native(broken_dir / "llama-server", succeeds=False)
+
+    healthy_dir = tmp_path / "healthy_bin"
+    _write_mock_native(healthy_dir / "llama-server", succeeds=True)
+
+    lines = [
+        # Populate bash hash cache with broken binary
+        f'export PATH="{git_bash_path(broken_dir)}:/usr/bin:/bin"',
+        'llama-server >/dev/null 2>&1 || true',
+        'hash',
+        # Now add healthy candidate later in PATH and run reconciliation
+        f'export PATH="$HOME/bin:{git_bash_path(broken_dir)}:{git_bash_path(healthy_dir)}:/usr/bin:/bin"',
+    ]
+    _append_llama_server_shim_reconciliation_lines(lines)
+    lines.append('llama-server -m /dummy/test.gguf')
+    lines.append('hash')
+
+    res = _run_shell(tmp_path, lines)
+    assert res.returncode == 0
+    assert "RUN_NATIVE: -m /dummy/test.gguf" in res.stdout
+    # Verify hash table ended with healthy binary, not broken
+    assert str(healthy_dir / "llama-server") in res.stdout
+
+
+def test_broken_native_candidate_falls_back_to_healthy_python_compatibility_shim(tmp_path):
+    """Regression: A broken native candidate must not shadow or retire a healthy Python shim."""
+    from core.platform_compat import git_bash_path
+    broken_dir = tmp_path / "broken_bin"
+    _write_mock_native(broken_dir / "llama-server", succeeds=False)
+
+    shim_file = tmp_path / "bin/llama-server"
+    _write_odysseus_shim(shim_file)
+
+    mock_py_dir = tmp_path / "mock_bin"
+    _write_mock_python3(mock_py_dir / "python3", succeeds=True)
+
+    lines = [
+        f'export PATH="$HOME/bin:{git_bash_path(broken_dir)}:{git_bash_path(mock_py_dir)}:/usr/bin:/bin"',
+    ]
+    _append_llama_server_shim_reconciliation_lines(lines)
+    lines.append('echo "RESOLVED=$_odysseus_llama_bin"')
+    lines.append('command -v llama-server')
+
+    res = _run_shell(tmp_path, lines)
+    assert res.returncode == 0
+    assert shim_file.exists(), "Healthy Python compatibility shim must be preserved"
+    assert f"RESOLVED={git_bash_path(shim_file)}" in res.stdout
+    assert str(shim_file) in res.stdout
+
+
+def test_broken_native_and_missing_python_backend_sets_preflight_127(tmp_path):
+    """Regression: When the only native candidates are broken and Python server is unavailable,
+    finalization must fail closed with ODYSSEUS_PREFLIGHT_EXIT=127 rather than claiming readiness."""
+    from core.platform_compat import git_bash_path
+    broken_dir = tmp_path / "broken_bin"
+    _write_mock_native(broken_dir / "llama-server", succeeds=False)
+
+    mock_py_dir = tmp_path / "mock_bin"
+    _write_mock_python3(mock_py_dir / "python3", succeeds=False)
+
+    lines = [
+        'ODYSSEUS_PREFLIGHT_EXIT=""',
+        f'export PATH="$HOME/bin:{git_bash_path(broken_dir)}:{git_bash_path(mock_py_dir)}:/usr/bin:/bin"',
+    ]
+    _append_llama_server_shim_definition_lines(lines)
+    _append_llama_server_shim_reconciliation_lines(lines)
+    _append_llama_server_finalization_lines(lines)
+    lines.append('echo "EXIT=$ODYSSEUS_PREFLIGHT_EXIT"')
+
+    res = _run_shell(tmp_path, lines)
+    assert res.returncode == 0
+    assert "EXIT=127" in res.stdout
+
+
+@pytest.mark.asyncio
+async def test_generated_runner_broken_first_healthy_second_e2e(monkeypatch, tmp_path):
+    """Integration regression: The full generated Cookbook runner script must launch the healthy
+    native candidate even when an earlier broken candidate exists on PATH."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+    from routes.cookbook_helpers import ServeRequest
+    import routes.cookbook_routes as cookbook_routes
+    from starlette.requests import Request
+    from core.platform_compat import git_bash_path
+
+    fake_home = tmp_path / "fake_home"
+    stale_shim = fake_home / "bin/llama-server"
+    _write_odysseus_shim(stale_shim)
+
+    broken_bin = fake_home / "broken/bin/llama-server"
+    _write_mock_native(broken_bin, succeeds=False)
+
+    healthy_bin = fake_home / "healthy/bin/llama-server"
+    _write_mock_native(healthy_bin, succeeds=True)
+
+    tmux_log_dir = tmp_path / "tmux_logs"
+    tmux_log_dir.mkdir(parents=True)
+    monkeypatch.setattr(cookbook_routes, "TMUX_LOG_DIR", tmux_log_dir)
+    monkeypatch.setattr(cookbook_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(cookbook_routes, "_binary_available", AsyncMock(return_value=True))
+    monkeypatch.setattr(cookbook_routes, "load_stored_hf_token", lambda **kwargs: "")
+    monkeypatch.setattr("core.database.SessionLocal", MagicMock())
+
+    class _Proc:
+        returncode = 0
+        stderr = None
+        async def wait(self):
+            return 0
+    monkeypatch.setattr(cookbook_routes.asyncio, "create_subprocess_shell", AsyncMock(return_value=_Proc()))
+
+    router = cookbook_routes.setup_cookbook_routes()
+    endpoint = None
+    for route in router.routes:
+        if route.path == "/api/model/serve" and "POST" in route.methods:
+            endpoint = route.endpoint
+            break
+    assert endpoint is not None
+
+    http_req = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/model/serve",
+        "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(
+            is_configured=True, is_admin=lambda user: user == "admin"))),
+    })
+    http_req.state.current_user = "admin"
+    http_req.state.local_model_authority = True
+
+    req = ServeRequest(
+        repo_id="test/repo",
+        cmd="llama-server -m /dummy/model.gguf --port 8090",
+        remote_host=None,
+    )
+
+    resp = await endpoint(http_req, req)
+    assert resp["ok"] is True
+    session_id = resp["session_id"]
+    runner_file = tmux_log_dir / f"{session_id}_run.sh"
+    assert runner_file.exists()
+
+    # Broken is earlier on PATH than healthy
+    res = _run_shell(
+        fake_home,
+        [str(runner_file)],
+        path=f"{git_bash_path(fake_home / 'bin')}:{git_bash_path(broken_bin.parent)}:{git_bash_path(healthy_bin.parent)}:/usr/bin:/bin",
+    )
+    assert res.returncode == 0
+    assert not stale_shim.exists(), "Stale shim must have been retired"
+    assert "RUN_NATIVE: -m /dummy/model.gguf --port 8090" in res.stdout
+    assert "error: missing libllama.so" not in res.stdout
     assert "Native llama-server not found — building from source" not in res.stdout
